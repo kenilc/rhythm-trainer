@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rhythm Trainer</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Rhythm Trainer</h1>
+      <div class="topbar-right">
+        <span id="midi-chip" class="chip"><span class="led"></span><span id="midi-text">MIDI…</span></span>
+        <button id="midi-connect" class="small" hidden>Connect MIDI</button>
+        <span class="chip" title="Latency offset subtracted from every hit">
+          Latency: <strong id="latency-text">not calibrated</strong>
+        </span>
+        <button id="calibrate" class="small">Calibrate</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel settings" aria-label="Settings">
+        <div class="field">
+          <label for="bpm">Tempo <span class="hint" id="bpm-unit">(♩ = BPM)</span></label>
+          <div class="tempo">
+            <button data-bpm="-5" class="small">−5</button>
+            <button data-bpm="-1" class="small">−1</button>
+            <input id="bpm" type="number" min="30" max="240" value="80" />
+            <button data-bpm="1" class="small">+1</button>
+            <button data-bpm="5" class="small">+5</button>
+            <button id="tap" class="small">Tap</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="meter">Time signature</label>
+          <select id="meter"></select>
+        </div>
+        <div class="field">
+          <label>Hands</label>
+          <div class="segmented" id="hands">
+            <button data-hands="1" class="on">One</button>
+            <button data-hands="2">Two</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="countin">Count-in</label>
+          <select id="countin">
+            <option value="1">1 bar</option>
+            <option value="2">2 bars</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="strictness">Strictness</label>
+          <select id="strictness">
+            <option value="strict">Strict (±15 / 35 / 70 ms)</option>
+            <option value="normal" selected>Normal (±25 / 50 / 100 ms)</option>
+            <option value="relaxed">Relaxed (±40 / 80 / 150 ms)</option>
+          </select>
+        </div>
+        <div class="field" id="split-field">
+          <label for="split">MIDI hand split</label>
+          <select id="split"></select>
+        </div>
+        <div class="field checks">
+          <label><input type="checkbox" id="click-during" checked /> Click during exercise</label>
+          <label><input type="checkbox" id="subdivide" /> Subdivide clicks</label>
+        </div>
+      </section>
+
+      <section class="panel exercise" aria-label="Exercise">
+        <div class="gen-row">
+          <div class="field">
+            <label for="level">Generator</label>
+            <select id="level"></select>
+          </div>
+          <div class="field">
+            <label for="bars">Bars</label>
+            <select id="bars">
+              <option>2</option>
+              <option selected>4</option>
+              <option>8</option>
+            </select>
+          </div>
+          <div class="field" id="lh-pattern-field">
+            <label for="lh-pattern">Left hand</label>
+            <select id="lh-pattern"></select>
+          </div>
+          <button id="generate" class="primary">Generate</button>
+        </div>
+        <details id="custom">
+          <summary>Write your own rhythm</summary>
+          <p class="hint">
+            <code>w h q e s</code> = whole, half, quarter, eighth, sixteenth · <code>.</code> dotted ·
+            <code>r</code> rest · <code>~</code> tie from previous · <code>|</code> bar line (optional).
+            Example: <code>q q e e q | h. qr | q. e ~q q</code>
+          </p>
+          <label for="rh-text">Right hand</label>
+          <textarea id="rh-text" rows="2" spellcheck="false"></textarea>
+          <div id="lh-text-wrap">
+            <label for="lh-text">Left hand</label>
+            <textarea id="lh-text" rows="2" spellcheck="false"></textarea>
+          </div>
+          <div class="row">
+            <button id="apply">Use this rhythm</button>
+            <span id="parse-error" class="error" role="alert"></span>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel stage" aria-label="Practice">
+        <div class="transport">
+          <button id="start" class="primary big">▶ Play</button>
+          <button id="listen" class="big">♪ Listen</button>
+          <button id="metronome" class="big">Metronome</button>
+          <button id="stop" class="big" disabled>■ Stop</button>
+          <div class="beat-display" aria-live="polite">
+            <span id="beat-main">Ready</span>
+            <span id="beat-sub"></span>
+          </div>
+        </div>
+        <div id="score" class="score"></div>
+        <div class="legend">
+          <span><i class="sw perfect"></i>perfect</span>
+          <span><i class="sw good"></i>good</span>
+          <span><i class="sw ok"></i>ok</span>
+          <span><i class="sw poor"></i>poor</span>
+          <span><b class="miss">✕</b> missed</span>
+          <span><b class="extra">+</b> extra hit</span>
+          <span class="hint">Numbers are ms: <b>−</b> early, <b>+</b> late.</span>
+          <span class="hint" id="keys-hint">Keyboard fallback: Space / J K L</span>
+        </div>
+      </section>
+
+      <section class="panel results" id="results" hidden aria-label="Results">
+        <h2>Results</h2>
+        <div id="summary" class="summary"></div>
+        <details>
+          <summary>Every hit</summary>
+          <table class="hits">
+            <thead>
+              <tr><th>Hand</th><th>Position</th><th>Key</th><th>Offset</th><th>Grade</th></tr>
+            </thead>
+            <tbody id="hit-rows"></tbody>
+          </table>
+        </details>
+      </section>
+    </main>
+
+    <dialog id="cal-dialog">
+      <h2>Calibrate latency</h2>
+      <p>
+        You'll hear 4 count-in clicks, then 12 more. Play any key <strong>exactly on each of the 12 clicks</strong>,
+        using the instrument you'll practise with. Use the same speakers/headphones too.
+      </p>
+      <div id="cal-progress" class="cal-progress"></div>
+      <p id="cal-result" class="cal-result"></p>
+      <div class="row end">
+        <button id="cal-cancel">Close</button>
+        <button id="cal-reset" class="small">Reset to 0</button>
+        <button id="cal-start" class="primary">Start</button>
+        <button id="cal-save" class="primary" hidden>Save</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
