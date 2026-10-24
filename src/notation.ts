@@ -1,8 +1,8 @@
 // Renders the exercise with VexFlow and draws timing feedback on top.
 import { Beam, Dot, Formatter, Fraction, Renderer, Stave, StaveConnector, StaveNote, StaveTie, Voice } from 'vexflow';
 import type { Exercise, Hand, RNote } from './rhythm';
-import { measureQuarters } from './rhythm';
-import type { Grade } from './scoring';
+import { exerciseOnsets, measureQuarters } from './rhythm';
+import type { Articulation, Grade } from './scoring';
 
 const VF_DUR: Record<RNote['base'], string> = { w: 'w', h: 'h', q: 'q', e: '8', s: '16' };
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -19,6 +19,11 @@ export interface RenderedScore {
   markMiss(hand: Hand, measure: number, index: number): void;
   /** Draw an unmatched hit at its position in time (quarters from start). */
   markExtra(hand: Hand, q: number): void;
+  /**
+   * Draw (or update) the bar showing how long a key was held, from q0 to q1
+   * in quarters. Each id is one key press; calling again replaces its bar.
+   */
+  drawHold(id: number, hand: Hand, q0: number, q1: number, kind: Articulation | 'holding' | 'extra'): void;
   /** Move the playback cursor to a quarter position (null hides it). */
   setCursor(q: number | null): void;
   clearMarks(): void;
@@ -53,8 +58,10 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   }
   if (cur.length) lines.push(cur);
 
-  const staffGap = 110;
-  const systemHeight = twoHands ? 250 : 140;
+  // Below each staff: marker row (dot + ms), then the duration lane.
+  const staffGap = 125;
+  const laneOffset = 26;
+  const systemHeight = twoHands ? 285 : 160;
   const renderer = new Renderer(container as HTMLDivElement, Renderer.Backends.SVG);
   renderer.resize(width, lines.length * systemHeight + 10);
   const ctx = renderer.getContext();
@@ -160,9 +167,15 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
 
   drawCrossBarTies(ex, noteAnchors, svg);
 
-  const marks = document.createElementNS(SVG_NS, 'g');
-  marks.setAttribute('class', 'marks');
-  svg.appendChild(marks);
+  const group = (cls: string) => {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', cls);
+    svg.appendChild(g);
+    return g;
+  };
+  const lanes = group('lanes');
+  const holds = group('holds');
+  const marks = group('marks');
   const cursor = document.createElementNS(SVG_NS, 'line');
   cursor.setAttribute('class', 'cursor');
   cursor.style.display = 'none';
@@ -201,7 +214,38 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     return { ...prev };
   };
 
+  /** Rectangles covering q0..q1 in a hand's duration lane, split at line breaks. */
+  const span = (parent: SVGGElement, hand: Hand, q0: number, q1: number, cls: string, trim = 0) => {
+    const out: SVGRectElement[] = [];
+    lineBounds.forEach((lb, li) => {
+      const a = Math.max(q0, lb.startQ);
+      const b = Math.min(q1, lb.endQ - 2e-6);
+      if (b <= a) return;
+      const xa = xAt(hand, a)!.x;
+      const xb = xAt(hand, b)!.x - (b === q1 ? trim : 0);
+      const r = document.createElementNS(SVG_NS, 'rect');
+      r.setAttribute('x', String(xa - 4));
+      r.setAttribute('y', String(markerY[hand][li] + laneOffset));
+      r.setAttribute('width', String(Math.max(3, xb - xa)));
+      r.setAttribute('height', '6');
+      r.setAttribute('rx', '2');
+      r.setAttribute('class', cls);
+      parent.appendChild(r);
+      out.push(r);
+    });
+    return out;
+  };
+
+  // Written lengths, always visible: the target for each held note.
+  for (const o of exerciseOnsets(ex)) span(lanes, o.hand, o.q, o.q + o.durQ, 'written', 6);
+
+  const holdEls = new Map<number, SVGRectElement[]>();
+
   return {
+    drawHold(id, hand, q0, q1, kind) {
+      holdEls.get(id)?.forEach((r) => r.remove());
+      holdEls.set(id, span(holds, hand, q0, Math.max(q1, q0 + 0.02), `held ${kind}`));
+    },
     markHit(hand, measure, index, grade, deltaMs) {
       const a = noteAnchors.get(`${hand}:${measure}:${index}`);
       if (!a) return;
@@ -237,6 +281,8 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     },
     clearMarks() {
       marks.innerHTML = '';
+      holds.innerHTML = '';
+      holdEls.clear();
     },
   };
 }

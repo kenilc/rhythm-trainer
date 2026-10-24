@@ -38,6 +38,13 @@ perfect ≤ 25 ms · good ≤ 50 ms · ok ≤ 100 ms · poor beyond that · miss
 The summary gives a **timing** figure (average early or late, i.e. rushing or dragging) and a
 **consistency** figure (spread). Consistency is usually the one to improve first.
 
+### Articulation
+
+Under each staff, a grey bar shows each note's written length (ties included), and a colored bar shows
+how long you actually held the key: **staccato** (< 50%), **detached** (50–85%), **legato** (≥ 85%),
+or **held too long** (well past the written length, e.g. into a rest). Only the finger release
+counts; the sustain pedal is ignored.
+
 ## Code
 
 - `src/rhythm.ts`: rhythm model, text parser, level-based generator

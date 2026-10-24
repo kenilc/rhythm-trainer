@@ -15,9 +15,32 @@ export const STRICTNESS: Record<string, Thresholds> = {
   relaxed: { perfect: 40, good: 80, ok: 150 },
 };
 
+export type Articulation = 'staccato' | 'detached' | 'legato' | 'long';
+
+export const ARTICULATION_NAMES: Record<Articulation, string> = {
+  staccato: 'staccato',
+  detached: 'detached',
+  legato: 'legato',
+  long: 'held too long',
+};
+
+/**
+ * Classify by held time ÷ written length. "Long" needs both a ratio and an
+ * absolute margin, so a tiny overlap into the next note still counts as legato.
+ */
+export function articulationFor(heldSec: number, writtenSec: number): Articulation {
+  const ratio = heldSec / writtenSec;
+  if (ratio > 1.25 && heldSec - writtenSec > 0.12) return 'long';
+  if (ratio >= 0.85) return 'legato';
+  if (ratio >= 0.5) return 'detached';
+  return 'staccato';
+}
+
 export interface Expected extends Onset {
   /** Audio-clock time in seconds. */
   time: number;
+  /** Written length in seconds. */
+  durSec: number;
   /** Half-width of the matching window in seconds. */
   window: number;
   hit?: HitRecord;
@@ -33,6 +56,11 @@ export interface HitRecord {
   deltaMs?: number;
   grade: Grade | 'extra';
   expected?: Expected;
+  /** Release time (audio clock, latency-compensated); undefined while held. */
+  release?: number;
+  /** Held time ÷ written length, for matched hits. */
+  heldRatio?: number;
+  articulation?: Articulation;
 }
 
 export function gradeFor(absMs: number, t: Thresholds): Grade {
@@ -54,7 +82,7 @@ export class Session {
     toTime: (q: number) => number,
     readonly thresholds: Thresholds,
   ) {
-    this.expected = onsets.map((o) => ({ ...o, time: toTime(o.q), window: 0 }));
+    this.expected = onsets.map((o) => ({ ...o, time: toTime(o.q), durSec: toTime(o.q + o.durQ) - toTime(o.q), window: 0 }));
     // Window: generous, but never more than ~half the gap to a neighbouring
     // onset in the same hand, so each hit can only belong to one note.
     for (const hand of ['R', 'L'] as Hand[]) {
@@ -86,6 +114,14 @@ export class Session {
     return rec;
   }
 
+  registerRelease(rec: HitRecord, time: number): void {
+    rec.release = Math.max(time, rec.time);
+    if (!rec.expected) return;
+    const held = rec.release - rec.time;
+    rec.heldRatio = held / rec.expected.durSec;
+    rec.articulation = articulationFor(held, rec.expected.durSec);
+  }
+
   /** Mark expected onsets whose window has passed as missed. Returns the newly missed ones. */
   sweepMisses(now: number): Expected[] {
     const out: Expected[] = [];
@@ -96,6 +132,14 @@ export class Session {
       }
     }
     return out;
+  }
+
+  private articulationSummary(matched: HitRecord[]): ArticulationSummary {
+    const counts: Record<Articulation, number> = { staccato: 0, detached: 0, legato: 0, long: 0 };
+    const released = matched.filter((h) => h.articulation);
+    released.forEach((h) => counts[h.articulation!]++);
+    const meanRatio = released.length ? released.reduce((s, h) => s + h.heldRatio!, 0) / released.length : 0;
+    return { counts, meanRatio, measured: released.length };
   }
 
   summary(hand?: Hand): Summary {
@@ -118,10 +162,18 @@ export class Session {
       extra,
       meanMs: mean,
       sdMs: sd,
+      articulation: this.articulationSummary(matched),
       // Extra hits cost half a note each so mashing keys doesn't pay off.
       score: exp.length ? Math.max(0, (points - extra * 0.5) / exp.length) : 0,
     };
   }
+}
+
+export interface ArticulationSummary {
+  counts: Record<Articulation, number>;
+  /** Mean held time ÷ written length over released notes. */
+  meanRatio: number;
+  measured: number;
 }
 
 export interface Summary {
@@ -135,4 +187,5 @@ export interface Summary {
   meanMs: number;
   sdMs: number;
   score: number;
+  articulation: ArticulationSummary;
 }

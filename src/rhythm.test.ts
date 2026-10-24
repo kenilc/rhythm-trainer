@@ -8,7 +8,7 @@ import {
   parseRhythm,
   splitMeasures,
 } from './rhythm';
-import { Session, STRICTNESS } from './scoring';
+import { articulationFor, Session, STRICTNESS } from './scoring';
 
 const m44 = { num: 4, den: 4 };
 
@@ -47,6 +47,12 @@ describe('exerciseOnsets', () => {
     const rh = splitMeasures(parseRhythm('q qr h | ~q q h'), m44);
     const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
     expect(onsets.map((o) => o.q)).toEqual([0, 2, 5, 6]);
+  });
+
+  it('includes tied continuations in the written length', () => {
+    const rh = splitMeasures(parseRhythm('q q h | ~q q h'), m44);
+    const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+    expect(onsets.map((o) => o.durQ)).toEqual([1, 1, 3, 1, 2]);
   });
 });
 
@@ -88,5 +94,29 @@ describe('Session', () => {
     const s = new Session(onsets, toTime, STRICTNESS.normal);
     s.registerHit('R', 0, 'C4');
     expect(s.registerHit('R', 0.02, 'C4').grade).toBe('extra');
+  });
+});
+
+describe('articulation', () => {
+  it('classifies by held time relative to the written length', () => {
+    expect(articulationFor(0.2, 0.5)).toBe('staccato');
+    expect(articulationFor(0.35, 0.5)).toBe('detached');
+    expect(articulationFor(0.48, 0.5)).toBe('legato');
+    // A small overlap into the next note is still legato…
+    expect(articulationFor(0.58, 0.5)).toBe('legato');
+    // …holding well past the written length is not.
+    expect(articulationFor(0.9, 0.5)).toBe('long');
+  });
+
+  it('records hold length on release', () => {
+    const rh = splitMeasures(parseRhythm('h h'), m44);
+    const s = new Session(exerciseOnsets({ meter: m44, rh, lh: null }), (q) => q * 0.5, STRICTNESS.normal);
+    const a = s.registerHit('R', 0, 'C4');
+    s.registerRelease(a, 0.3); // 0.3 s of a 1 s half note
+    const b = s.registerHit('R', 1, 'C4');
+    s.registerRelease(b, 1.95);
+    expect(a.articulation).toBe('staccato');
+    expect(b.articulation).toBe('legato');
+    expect(s.summary().articulation.counts).toMatchObject({ staccato: 1, legato: 1 });
   });
 });

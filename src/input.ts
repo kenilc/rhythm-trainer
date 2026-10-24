@@ -4,6 +4,10 @@
 // CoreMIDI wrapper) can feed the same events later.
 
 export interface RawHit {
+  /** Key press or release. */
+  kind: 'down' | 'up';
+  /** Identifies the physical key, so a release can be paired with its press. */
+  id: string;
   /** performance.now() timestamp of the event. */
   perf: number;
   source: 'midi' | 'key';
@@ -33,7 +37,8 @@ export class InputManager {
   private access: MIDIAccess | null = null;
 
   constructor(private onMidiStatus: (s: MidiStatus) => void) {
-    window.addEventListener('keydown', (e) => this.onKey(e));
+    window.addEventListener('keydown', (e) => this.onKey(e, 'down'));
+    window.addEventListener('keyup', (e) => this.onKey(e, 'up'));
   }
 
   onHit(fn: (h: RawHit) => void): () => void {
@@ -45,14 +50,21 @@ export class InputManager {
     for (const fn of this.listeners) fn(h);
   }
 
-  private onKey(e: KeyboardEvent): void {
-    if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  private onKey(e: KeyboardEvent, kind: 'down' | 'up'): void {
+    if (e.repeat || (kind === 'down' && (e.metaKey || e.ctrlKey || e.altKey))) return;
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     const keyHand = LH_KEYS.has(e.code) ? 'L' : RH_KEYS.has(e.code) ? 'R' : undefined;
     if (!keyHand) return;
     if (e.code === 'Space') e.preventDefault();
-    this.emit({ perf: e.timeStamp, source: 'key', keyHand, label: e.code === 'Space' ? 'Space' : e.key.toUpperCase() });
+    this.emit({
+      kind,
+      id: `key:${e.code}`,
+      perf: e.timeStamp,
+      source: 'key',
+      keyHand,
+      label: e.code === 'Space' ? 'Space' : e.key.toUpperCase(),
+    });
   }
 
   async initMidi(): Promise<void> {
@@ -84,8 +96,18 @@ export class InputManager {
     const d = e.data;
     if (!d || d.length < 3) return;
     const cmd = d[0] & 0xf0;
-    // Note-on with velocity > 0. Note-offs, pedal etc. are ignored.
-    if (cmd !== 0x90 || d[2] === 0) return;
-    this.emit({ perf: e.timeStamp, source: 'midi', note: d[1], label: midiNoteName(d[1]) });
+    // Note-on with velocity 0 is a note-off. The sustain pedal is ignored on
+    // purpose: we measure when the finger lets go, not how long it rings.
+    const isOn = cmd === 0x90 && d[2] > 0;
+    const isOff = cmd === 0x80 || (cmd === 0x90 && d[2] === 0);
+    if (!isOn && !isOff) return;
+    this.emit({
+      kind: isOn ? 'down' : 'up',
+      id: `midi:${d[1]}`,
+      perf: e.timeStamp,
+      source: 'midi',
+      note: d[1],
+      label: midiNoteName(d[1]),
+    });
   }
 }

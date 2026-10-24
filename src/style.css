@@ -13,6 +13,11 @@
   --miss: #cc2936;
   --extra: #8a4fd1;
   --cursor: rgba(47, 91, 211, 0.55);
+  --written: #d9d6ce;
+  --staccato: #0f8fa3;
+  --detached: #5470d6;
+  --legato: #2f3c8f;
+  --long: #cc2936;
   --score-ink: #1d1d1f;
   color-scheme: light dark;
 }
@@ -33,6 +38,11 @@
     --miss: #ff5c6a;
     --extra: #b689ff;
     --cursor: rgba(110, 147, 255, 0.6);
+    --written: #45454d;
+    --staccato: #3fc4d6;
+    --detached: #7f9bff;
+    --legato: #c5d0ff;
+    --long: #ff5c6a;
     --score-ink: #ececef;
   }
 }
@@ -417,6 +427,42 @@ b.extra, .extra { color: var(--extra); }
   gap: 4px 10px;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* Duration lane: written length behind, held length on top. */
+.score rect.written {
+  fill: var(--written);
+  stroke: none;
+}
+.score rect.held {
+  stroke: none;
+  opacity: 0.9;
+}
+.score rect.held.holding { fill: var(--muted); }
+.score rect.held.extra { fill: var(--extra); }
+.score rect.held.staccato { fill: var(--staccato); }
+.score rect.held.detached { fill: var(--detached); }
+.score rect.held.legato { fill: var(--legato); }
+.score rect.held.long { fill: var(--long); }
+.legend .bar {
+  display: inline-block;
+  width: 22px;
+  height: 6px;
+  border-radius: 2px;
+  margin-right: 5px;
+  vertical-align: 1px;
+}
+.bar.written { background: var(--written); }
+.bar.art-staccato { background: var(--staccato); }
+.bar.art-detached { background: var(--detached); }
+.bar.art-legato { background: var(--legato); }
+.bar.art-long { background: var(--long); }
+.art-staccato { color: var(--staccato); }
+.art-detached { color: var(--detached); }
+.art-legato { color: var(--legato); }
+.art-long { color: var(--long); }
+.counts.arts {
+  margin-top: 4px;
 }
 
 table.hits {

@@ -32,6 +32,8 @@ export interface Onset {
   q: number;
   measure: number;
   index: number;
+  /** Written length in quarters, including notes tied onto it. */
+  durQ: number;
 }
 
 const BASE_DUR: Record<Base, number> = { w: 4, h: 2, q: 1, e: 0.5, s: 0.25 };
@@ -130,7 +132,7 @@ export function exerciseOnsets(ex: Exercise): Onset[] {
     measures.forEach((notes, mi) => {
       let pos = mi * mq;
       notes.forEach((n, ni) => {
-        if (!n.rest && !n.tie) out.push({ hand, q: pos, measure: mi, index: ni });
+        if (!n.rest && !n.tie) out.push({ hand, q: pos, measure: mi, index: ni, durQ: soundingQuarters(measures, mi, ni) });
         pos += n.dur;
       });
     });
@@ -138,6 +140,22 @@ export function exerciseOnsets(ex: Exercise): Onset[] {
   add('R', ex.rh);
   if (ex.lh) add('L', ex.lh);
   return out.sort((a, b) => a.q - b.q);
+}
+
+/** Length a note actually sounds, including notes tied onto it. */
+export function soundingQuarters(measures: RNote[][], measure: number, index: number): number {
+  let total = 0;
+  let mi = measure;
+  let ni = index;
+  for (;;) {
+    total += measures[mi][ni].dur;
+    ni++;
+    if (ni >= measures[mi].length) {
+      mi++;
+      ni = 0;
+    }
+    if (mi >= measures.length || !measures[mi][ni].tie) return total;
+  }
 }
 
 export function totalQuarters(ex: Exercise): number {

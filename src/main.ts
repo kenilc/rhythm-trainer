@@ -19,7 +19,15 @@ import {
   type LhPattern,
   type Meter,
 } from './rhythm';
-import { Session, STRICTNESS, type Expected, type HitRecord, type Summary } from './scoring';
+import {
+  ARTICULATION_NAMES,
+  Session,
+  STRICTNESS,
+  type Articulation,
+  type Expected,
+  type HitRecord,
+  type Summary,
+} from './scoring';
 
 // ---------------------------------------------------------------------------
 // Persistent settings (per browser/device)
@@ -195,7 +203,13 @@ interface Run {
   quarterSec: number;
   session: Session | null;
   raf: number;
+  /** Keys currently held down, by input id. */
+  held: Map<string, { rec: HitRecord; drawId: number }>;
 }
+
+/** How long to wait after the last note for keys still held down. */
+const RELEASE_GRACE = 1.5;
+let holdIds = 0;
 
 let run: Run | null = null;
 let calib: CalibRun | null = null;
@@ -255,7 +269,7 @@ function startRun(mode: 'play' | 'listen'): void {
   let session: Session | null = null;
   if (mode === 'listen') {
     for (const o of onsets) {
-      tone(bus, exStart + o.q * quarterSec, o.hand, soundingQuarters(o.hand, o.measure, o.index) * quarterSec);
+      tone(bus, exStart + o.q * quarterSec, o.hand, o.durQ * quarterSec);
     }
   } else {
     session = new Session(onsets, (q) => exStart + q * quarterSec, STRICTNESS[settings.strictness]);
@@ -274,26 +288,10 @@ function startRun(mode: 'play' | 'listen'): void {
     quarterSec,
     session,
     raf: 0,
+    held: new Map(),
   };
   setRunning(true);
   run.raf = requestAnimationFrame(frame);
-}
-
-/** Length a note actually sounds, including notes tied onto it. */
-function soundingQuarters(hand: Hand, measure: number, index: number): number {
-  const measures = hand === 'R' ? exercise.rh : exercise.lh!;
-  let total = 0;
-  let mi = measure;
-  let ni = index;
-  for (;;) {
-    total += measures[mi][ni].dur;
-    ni++;
-    if (ni >= measures[mi].length) {
-      mi++;
-      ni = 0;
-    }
-    if (mi >= measures.length || !measures[mi][ni].tie) return total;
-  }
 }
 
 /** Current audible time, in the same frame as compensated hits. */
@@ -320,18 +318,28 @@ function frame(): void {
 
   if (run.session) {
     for (const e of run.session.sweepMisses(now - lat())) rendered.markMiss(e.hand, e.measure, e.index);
+    // Grow the bars of keys still held down.
+    const qNow = (now - lat() - run.exStart) / run.quarterSec;
+    for (const { rec, drawId } of run.held.values()) {
+      rendered.drawHold(drawId, rec.hand, qOf(rec.time), qNow, 'holding');
+    }
   }
 
-  if (now > run.end) {
+  // Wait a little past the end for the last notes to be released.
+  if (now > run.end && (run.held.size === 0 || now > run.end + RELEASE_GRACE)) {
     finishRun();
     return;
   }
   run.raf = requestAnimationFrame(frame);
 }
 
+const qOf = (t: number) => (run ? (t - run.exStart) / run.quarterSec : 0);
+
 function finishRun(): void {
   if (!run) return;
   const r = run;
+  // Keys still down at the very end: count them as released now.
+  for (const id of [...r.held.keys()]) release(id, nowAudible() - lat());
   stopAll();
   if (r.session) {
     for (const e of r.session.sweepMisses(Infinity)) rendered.markMiss(e.hand, e.measure, e.index);
@@ -366,7 +374,20 @@ function handFor(h: RawHit): Hand {
   return h.keyHand ?? 'R';
 }
 
+function release(id: string, t: number): void {
+  const h = run?.held.get(id);
+  if (!run?.session || !h) return;
+  run.held.delete(id);
+  run.session.registerRelease(h.rec, t);
+  const kind = h.rec.articulation ?? (h.rec.expected ? 'holding' : 'extra');
+  rendered.drawHold(h.drawId, h.rec.hand, qOf(h.rec.time), qOf(h.rec.release!), kind);
+}
+
 function onHit(h: RawHit): void {
+  if (h.kind === 'up') {
+    if (run) release(h.id, perfToAudio(h.perf) - lat());
+    return;
+  }
   flashLed();
   if (calib) {
     calib.hits.push(perfToAudio(h.perf));
@@ -378,6 +399,9 @@ function onHit(h: RawHit): void {
   if (t < run.exStart - 0.25 || t > run.end) return;
   const hand = handFor(h);
   const rec = run.session.registerHit(hand, t, h.label);
+  // A repeated press without a release (shouldn't happen) closes the old one first.
+  release(h.id, t);
+  run.held.set(h.id, { rec, drawId: holdIds++ });
   if (rec.expected) {
     rendered.markHit(hand, rec.expected.measure, rec.expected.index, rec.grade as Exclude<HitRecord['grade'], 'extra'>, rec.deltaMs!);
   } else {
@@ -401,6 +425,15 @@ function consistency(sd: number): string {
   return `±${v} ms (${word})`;
 }
 
+const ARTICULATION_ORDER: Articulation[] = ['staccato', 'detached', 'legato', 'long'];
+
+function articulationLine(s: Summary): string {
+  const a = s.articulation;
+  if (!a.measured) return '—';
+  const top = ARTICULATION_ORDER.reduce((x, y) => (a.counts[y] > a.counts[x] ? y : x));
+  return `Mostly ${ARTICULATION_NAMES[top]} (held ${Math.round(a.meanRatio * 100)}% on average)`;
+}
+
 function summaryCard(title: string, s: Summary): string {
   return `
     <div class="card">
@@ -409,6 +442,7 @@ function summaryCard(title: string, s: Summary): string {
       <dl>
         <dt>Timing</dt><dd>${tendency(s)}</dd>
         <dt>Consistency</dt><dd>${consistency(s.sdMs)}</dd>
+        <dt>Articulation</dt><dd>${articulationLine(s)}</dd>
       </dl>
       <div class="counts">
         <span class="perfect">${s.perfect} perfect</span>
@@ -417,6 +451,9 @@ function summaryCard(title: string, s: Summary): string {
         <span class="poor">${s.poor} poor</span>
         <span class="miss">${s.missed} missed</span>
         <span class="extra">${s.extra} extra</span>
+      </div>
+      <div class="counts arts">
+        ${ARTICULATION_ORDER.map((k) => `<span class="art-${k}">${s.articulation.counts[k]} ${ARTICULATION_NAMES[k]}</span>`).join('')}
       </div>
     </div>`;
 }
@@ -448,10 +485,17 @@ function showResults(session: Session): void {
   for (const h of session.hits) {
     const ms = h.deltaMs === undefined ? '' : `${h.deltaMs > 0 ? '+' : ''}${Math.round(h.deltaMs)} ms`;
     const pos = h.expected ? positionLabel(h.expected) : 'between notes';
-    rows.push({ t: h.time, html: `<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}</td>` });
+    const held = h.release === undefined ? '' : `${Math.round((h.release - h.time) * 1000)} ms`;
+    const art = h.articulation
+      ? `<span class="art-${h.articulation}">${ARTICULATION_NAMES[h.articulation]}</span> <span class="hint">${Math.round(h.heldRatio! * 100)}%</span>`
+      : '';
+    rows.push({
+      t: h.time,
+      html: `<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}</td><td>${held}</td><td>${art}</td>`,
+    });
   }
   for (const e of session.expected) {
-    if (!e.hit) rows.push({ t: e.time, html: `<td>${handName(e.hand)}</td><td>${positionLabel(e)}</td><td>—</td><td></td><td class="miss">missed</td>` });
+    if (!e.hit) rows.push({ t: e.time, html: `<td>${handName(e.hand)}</td><td>${positionLabel(e)}</td><td>—</td><td></td><td class="miss">missed</td><td></td><td></td>` });
   }
   rows.sort((a, b) => a.t - b.t);
   $('hit-rows').innerHTML = rows.map((r) => `<tr>${r.html}</tr>`).join('');
