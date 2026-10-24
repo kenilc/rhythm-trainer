@@ -1,6 +1,6 @@
 import { audioCtx, click, makeBus, Metronome, perfToAudio, tone } from './audio';
 import { InputManager, midiNoteName, type MidiStatus, type RawHit } from './input';
-import { renderScore, type RenderedScore } from './notation';
+import { renderScore, type NoteMark, type RenderedScore } from './notation';
 import { KEYS, keyById, pitchName, spellMidi } from './pitch';
 import {
   beatQuarters,
@@ -25,7 +25,9 @@ import {
 } from './rhythm';
 import {
   ARTICULATION_NAMES,
+  gradeFor,
   Session,
+  spreadOf,
   STRICTNESS,
   type Articulation,
   type Expected,
@@ -164,6 +166,7 @@ function syncControls(): void {
   $('lh-text-wrap').hidden = !settings.twoHands;
   $('split-field').hidden = !settings.twoHands;
   $('bpm-unit').textContent = meterOf(settings.meter).den === 2 ? '(𝅗𝅥 = BPM)' : '(♩ = BPM)';
+  $('chord-legend').hidden = !(exercise && isPitched(exercise));
   $('keys-hint').textContent =
     (settings.twoHands
       ? 'Keyboard fallback: left hand A S D F · right hand J K L ; / Space'
@@ -431,7 +434,7 @@ function frame(): void {
 
   if (r.session) {
     for (const e of r.session.sweepMisses(now - lat())) {
-      if (e.rep === r.shown) rendered.markMiss(e.hand, e.measure, e.index);
+      if (e.rep === r.shown) refreshMark(r.session, e);
     }
     // Grow the bars of keys still held down.
     for (const { rec, drawId } of r.held.values()) {
@@ -474,7 +477,7 @@ function finishRun(): void {
     return;
   }
   for (const e of r.session.expected) {
-    if (e.rep === r.shown && reps.includes(e.rep) && !e.hit && e.missed) rendered.markMiss(e.hand, e.measure, e.index);
+    if (e.rep === r.shown && reps.includes(e.rep) && !e.hit && e.missed) refreshMark(r.session, e);
   }
   showResults(r.session, reps);
   const s = r.session.summary(undefined, reps);
@@ -538,19 +541,42 @@ function onHit(h: RawHit): void {
   const t = perfToAudio(h.perf) - lat();
   // Ignore stray notes during the count-in.
   if (t < r.exStart - 0.25 || t > r.end) return;
-  const hand = handFor(h);
   const played = h.source === 'midi' ? h.note : undefined;
+  // A key the exercise is waiting for in one hand counts for that hand.
+  const hand = (played !== undefined && settings.twoHands && session.handForKey(played, t)) || handFor(h);
   const rec = session.registerHit(hand, t, h.label, repAt(r, t), played);
   // A repeated press without a release (shouldn't happen) closes the old one first.
   release(h.id, t);
   r.held.set(h.id, { rec, drawId: holdIds++ });
   if (rec.rep !== r.shown) return;
   if (rec.expected) {
-    const wrong = rec.wrongNote ? spellMidi(rec.played!, keyById(exercise.key)) : undefined;
-    rendered.markHit(hand, rec.expected.measure, rec.expected.index, rec.grade as Exclude<HitRecord['grade'], 'extra'>, rec.deltaMs!, wrong);
+    refreshMark(session, rec.expected);
   } else {
     rendered.markExtra(hand, qIn(r, t, rec.rep));
   }
+}
+
+/** Redraw the mark of the note or chord an expected tone belongs to. */
+function refreshMark(session: Session, e: Expected): void {
+  const tones = session.expected.filter(
+    (x) => x.rep === e.rep && x.hand === e.hand && x.measure === e.measure && x.index === e.index,
+  );
+  const hits = tones.filter((x) => x.hit).map((x) => x.hit!);
+  const written = (e.hand === 'R' ? exercise.rh : exercise.lh!)[e.measure][e.index].pitches;
+  const key = keyById(exercise.key);
+  const mark: NoteMark = {
+    missed: hits.length === 0 && tones.every((x) => x.missed),
+    wrong: hits.filter((h) => h.wrongNote).map((h) => spellMidi(h.played!, key)),
+    // Rings only for a chord that was partly played; a fully missed note says "miss".
+    missedTones: written && tones.length > 1 && hits.length ? tones.filter((x) => x.missed).map((x) => written[x.tone]) : [],
+  };
+  if (hits.length) {
+    mark.meanMs = hits.reduce((s, h) => s + h.deltaMs!, 0) / hits.length;
+    mark.grade = gradeFor(Math.abs(mark.meanMs), session.thresholds);
+  }
+  const spread = spreadOf(tones);
+  if (spread !== undefined) mark.spreadMs = spread;
+  rendered.markNote(e.hand, e.measure, e.index, mark);
 }
 
 /** Live strip of per-repetition scores during a loop. */
@@ -596,6 +622,13 @@ function articulationLine(s: Summary): string {
   return `Mostly ${ARTICULATION_NAMES[top]} (held ${Math.round(a.meanRatio * 100)}% on average)`;
 }
 
+/** How together chord keys were, on average. */
+function chordLine(ms: number): string {
+  const v = Math.round(ms);
+  const word = v <= 15 ? 'together' : v <= 30 ? 'nearly together' : v <= 50 ? 'a bit rolled' : 'rolled';
+  return `↔ ${v} ms first to last key (${word})`;
+}
+
 function summaryCard(title: string, s: Summary): string {
   return `
     <div class="card">
@@ -605,6 +638,7 @@ function summaryCard(title: string, s: Summary): string {
         <dt>Timing</dt><dd>${tendency(s)}</dd>
         <dt>Consistency</dt><dd>${consistency(s.sdMs)}</dd>
         <dt>Articulation</dt><dd>${articulationLine(s)}</dd>
+        ${s.chordSpreadMs === undefined ? '' : `<dt>Chords</dt><dd>${chordLine(s.chordSpreadMs)}</dd>`}
       </dl>
       <div class="counts">
         <span class="perfect">${s.perfect} perfect</span>
@@ -680,7 +714,7 @@ function showResults(session: Session, reps: number[]): void {
 function wrongNote(h: HitRecord): string {
   if (!h.wrongNote || !h.expected) return '';
   const part = h.expected.hand === 'R' ? exercise.rh : exercise.lh!;
-  const want = part[h.expected.measure][h.expected.index].pitch;
+  const want = part[h.expected.measure][h.expected.index].pitches?.[h.expected.tone];
   return ` <span class="miss">· wrong note${want ? ` (wanted ${pitchName(want)})` : ''}</span>`;
 }
 

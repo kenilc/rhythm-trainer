@@ -26,12 +26,8 @@ interface MeasureSpan {
 }
 
 export interface RenderedScore {
-  /**
-   * Draw a graded hit under the note at (hand, measure, index). With
-   * `wrongPitch`, also draw the note that was actually played.
-   */
-  markHit(hand: Hand, measure: number, index: number, grade: Grade, deltaMs: number, wrongPitch?: Pitch): void;
-  markMiss(hand: Hand, measure: number, index: number): void;
+  /** Draw (or redraw) the feedback for the note or chord at (hand, measure, index). */
+  markNote(hand: Hand, measure: number, index: number, mark: NoteMark): void;
   /** Draw an unmatched hit at its position in time (quarters from start). */
   markExtra(hand: Hand, q: number): void;
   /**
@@ -44,6 +40,21 @@ export interface RenderedScore {
   clearMarks(): void;
 }
 
+/** Feedback for one written note or chord, built up as its keys are played. */
+export interface NoteMark {
+  /** Nothing was played for it. */
+  missed: boolean;
+  /** Timing grade and average offset of the keys played. */
+  grade?: Grade;
+  meanMs?: number;
+  /** Chords: ms between the first and last key. */
+  spreadMs?: number;
+  /** Keys played on time that aren't written here. */
+  wrong: Pitch[];
+  /** Chords: written tones nobody played. */
+  missedTones: Pitch[];
+}
+
 export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore {
   container.innerHTML = '';
   const width = Math.max(320, container.clientWidth);
@@ -52,7 +63,7 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   const timeSig = `${ex.meter.num}/${ex.meter.den}`;
   const pitched = isPitched(ex);
   // One hand: low parts read better in the bass clef.
-  const rhPitches = ex.rh.flat().filter((n) => n.pitch).map((n) => midiOf(n.pitch!));
+  const rhPitches = ex.rh.flat().flatMap((n) => n.pitches ?? []).map(midiOf);
   const rhClef: Clef =
     !twoHands && rhPitches.length && rhPitches.reduce((a, b) => a + b, 0) / rhPitches.length < 60 ? 'bass' : 'treble';
 
@@ -89,13 +100,15 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   // Stave geometry: top line at y+40, bottom line at y+80 (VexFlow lines 5…1).
   const clefOf: Record<Hand, Clef> = { R: rhClef, L: 'bass' };
   const extent = (hand: Hand) => {
-    const ls = [...(hand === 'R' ? ex.rh : ex.lh ?? [])].flat().filter((n) => n.pitch).map((n) => staffLine(n.pitch!, clefOf[hand]));
+    const ls = [...(hand === 'R' ? ex.rh : ex.lh ?? [])].flat().flatMap((n) => n.pitches ?? []).map((p) => staffLine(p, clefOf[hand]));
     const lo = Math.min(3, ...ls);
     const hi = Math.max(3, ...ls);
     return { above: Math.max(0, (hi - 5) * 10 + 8), below: Math.max(0, (1 - lo) * 10 + 8) };
   };
   const ext = { R: extent('R'), L: extent('L') };
-  const laneOffset = 26;
+  // With chords, the marker row gets a second line (the chord spread).
+  const hasChords = [...ex.rh, ...(ex.lh ?? [])].some((m) => m.some((n) => (n.pitches?.length ?? 0) > 1));
+  const laneOffset = hasChords ? 38 : 26;
   const rhY = Math.max(0, ext.R.above - 30);
   const rhMarker = rhY + 80 + Math.max(32, ext.R.below + 20);
   const lhY = Math.max(rhY + 125, rhMarker + laneOffset + 6 + 12 + ext.L.above - 40);
@@ -161,12 +174,12 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       const built = parts.map((p) => {
         const vfNotes = p.notes.map((n) => {
           const sn = new StaveNote({
-            keys: [n.pitch ? vfKey(n.pitch) : p.key],
+            keys: n.pitches ? n.pitches.map(vfKey) : [p.key],
             duration: VF_DUR[n.base],
             dots: n.dotted ? 1 : 0,
             type: n.rest ? 'r' : 'n',
             clef: clefOf[p.hand],
-            auto_stem: !!n.pitch,
+            auto_stem: !!n.pitches,
           });
           if (n.dotted) Dot.buildAndAttach([sn], { all: true });
           // Attach now so positions can be read before drawing.
@@ -213,12 +226,14 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
           const cur = b.vfNotes[ni];
           if (n.tie) {
             const prev = ni > 0 ? { note: b.vfNotes[ni - 1], line: li } : lastNote[b.hand];
+            // Tie every tone of a chord.
+            const idx = (n.pitches ?? [null]).map((_, i) => i);
             if (prev?.line === li) {
-              new StaveTie({ first_note: prev.note, last_note: cur, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+              new StaveTie({ first_note: prev.note, last_note: cur, first_indices: idx, last_indices: idx }).setContext(ctx).draw();
             } else if (prev) {
               // Across a line break: a tie out of the old line and one into the new.
-              new StaveTie({ first_note: prev.note, last_note: null, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
-              new StaveTie({ first_note: null, last_note: cur, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+              new StaveTie({ first_note: prev.note, last_note: null, first_indices: idx, last_indices: idx }).setContext(ctx).draw();
+              new StaveTie({ first_note: null, last_note: cur, first_indices: idx, last_indices: idx }).setContext(ctx).draw();
             }
           }
         });
@@ -255,26 +270,26 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   cursor.style.display = 'none';
   svg.appendChild(cursor);
 
-  const label = (x: number, y: number, text: string, cls: string) => {
+  const label = (x: number, y: number, text: string, cls: string, parent: SVGElement = marks) => {
     const t = document.createElementNS(SVG_NS, 'text');
     t.setAttribute('x', String(x));
     t.setAttribute('y', String(y + 16));
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('class', cls);
     t.textContent = text;
-    marks.appendChild(t);
+    parent.appendChild(t);
   };
-  const dot = (x: number, y: number, cls: string) => {
+  const dot = (x: number, y: number, cls: string, parent: SVGElement = marks) => {
     const c = document.createElementNS(SVG_NS, 'circle');
     c.setAttribute('cx', String(x));
     c.setAttribute('cy', String(y));
     c.setAttribute('r', '5');
     c.setAttribute('class', cls);
-    marks.appendChild(c);
+    parent.appendChild(c);
   };
 
   /** The note that was played instead, drawn in red beside the written one. */
-  const ghostNote = (stave: Stave, clef: Clef, x: number, p: Pitch) => {
+  const ghostNote = (stave: Stave, clef: Clef, x: number, p: Pitch, parent: SVGElement) => {
     const line = staffLine(p, clef);
     const g = document.createElementNS(SVG_NS, 'g');
     g.setAttribute('class', 'wrong-note');
@@ -305,8 +320,23 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     const title = document.createElementNS(SVG_NS, 'title');
     title.textContent = `Played ${pitchName(p)}`;
     g.appendChild(title);
-    marks.appendChild(g);
+    parent.appendChild(g);
   };
+  /** A red ring around a written chord tone that wasn't played. */
+  const missRing = (stave: Stave, clef: Clef, x: number, p: Pitch, parent: SVGElement) => {
+    const y = stave.getYForNote(staffLine(p, clef));
+    const ring = document.createElementNS(SVG_NS, 'ellipse');
+    ring.setAttribute('cx', String(x));
+    ring.setAttribute('cy', String(y));
+    ring.setAttribute('rx', '8');
+    ring.setAttribute('ry', '6.5');
+    ring.setAttribute('class', 'missed-tone');
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = `Not played: ${pitchName(p)}`;
+    ring.appendChild(title);
+    parent.appendChild(ring);
+  };
+  const noteMarks = new Map<string, SVGGElement>();
   const ledger = (g: SVGGElement, x: number, y: number) => {
     const l = document.createElementNS(SVG_NS, 'line');
     l.setAttribute('x1', String(x - 9));
@@ -360,20 +390,32 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       holdEls.get(id)?.forEach((r) => r.remove());
       holdEls.set(id, span(holds, hand, q0, Math.max(q1, q0 + 0.02), `held ${kind}`));
     },
-    markHit(hand, measure, index, grade, deltaMs, wrongPitch) {
-      const a = noteAnchors.get(`${hand}:${measure}:${index}`);
-      if (!a) return;
-      dot(a.x, a.y, `mark ${grade}`);
-      const ms = Math.round(deltaMs);
-      label(a.x, a.y, `${ms > 0 ? '+' : ''}${ms}`, `mark-text ${grade}`);
+    markNote(hand, measure, index, m) {
+      const k = `${hand}:${measure}:${index}`;
+      const a = noteAnchors.get(k);
       const stave = staves.get(`${hand}:${measure}`);
-      if (wrongPitch && stave) ghostNote(stave, clefOf[hand], a.x, wrongPitch);
-    },
-    markMiss(hand, measure, index) {
-      const a = noteAnchors.get(`${hand}:${measure}:${index}`);
-      if (!a) return;
-      label(a.x, a.y - 11, '✕', 'mark-text miss big');
-      label(a.x, a.y, 'miss', 'mark-text miss');
+      if (!a || !stave) return;
+      noteMarks.get(k)?.remove();
+      const g = document.createElementNS(SVG_NS, 'g');
+      marks.appendChild(g);
+      noteMarks.set(k, g);
+      if (m.missed) {
+        label(a.x, a.y - 11, '✕', 'mark-text miss big', g);
+        label(a.x, a.y, 'miss', 'mark-text miss', g);
+        return;
+      }
+      if (m.grade && m.meanMs !== undefined) {
+        dot(a.x, a.y, `mark ${m.grade}`, g);
+        const ms = Math.round(m.meanMs);
+        label(a.x, a.y, `${ms > 0 ? '+' : ''}${ms}`, `mark-text ${m.grade}`, g);
+      }
+      if (m.spreadMs !== undefined) {
+        const v = Math.round(m.spreadMs);
+        const cls = v <= 15 ? 'perfect' : v <= 30 ? 'good' : v <= 50 ? 'ok' : 'poor';
+        label(a.x, a.y + 12, `↔${v}`, `mark-text spread ${cls}`, g);
+      }
+      for (const p of m.wrong) ghostNote(stave, clefOf[hand], a.x, p, g);
+      for (const p of m.missedTones) missRing(stave, clefOf[hand], a.x, p, g);
     },
     markExtra(hand, q) {
       const a = xAt(hand, q);
@@ -397,6 +439,7 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     },
     clearMarks() {
       marks.innerHTML = '';
+      noteMarks.clear();
       holds.innerHTML = '';
       holdEls.clear();
     },

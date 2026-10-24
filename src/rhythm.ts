@@ -12,8 +12,8 @@ export interface RNote {
   /** Tied from the previous note: sounds as a continuation, no new onset. */
   tie: boolean;
   dur: number;
-  /** Absent for rests and in rhythm-only exercises. */
-  pitch?: Pitch;
+  /** One pitch for a note, several for a chord (low to high). Absent for rests and in rhythm-only exercises. */
+  pitches?: Pitch[];
 }
 
 export interface Meter {
@@ -40,8 +40,10 @@ export interface Onset {
   index: number;
   /** Written length in quarters, including notes tied onto it. */
   durQ: number;
-  /** MIDI note expected, for pitched exercises. */
+  /** MIDI note expected, for pitched exercises. A chord has one onset per tone. */
   midi?: number;
+  /** Which tone of the note this is (0 = lowest); always 0 for single notes. */
+  tone: number;
 }
 
 const BASE_DUR: Record<Base, number> = { w: 4, h: 2, q: 1, e: 0.5, s: 0.25 };
@@ -62,13 +64,18 @@ export function beatQuarters(m: Meter): number {
   return 4 / m.den;
 }
 
-export function makeNote(base: Base, dotted = false, rest = false, tie = false, pitch?: Pitch): RNote {
+export function makeNote(base: Base, dotted = false, rest = false, tie = false, pitches?: Pitch[]): RNote {
   const n: RNote = { base, dotted, rest, tie, dur: BASE_DUR[base] * (dotted ? 1.5 : 1) };
-  if (pitch) n.pitch = pitch;
+  if (pitches?.length) n.pitches = pitches;
   return n;
 }
 
 const TOKEN = /^(~)?(?:([^/]+)\/)?([whqes])(\.)?(r)?$/;
+/** A chord keeps its spaces inside the parentheses, so tokens can't simply be split on spaces. */
+const TOKENIZE = /~?\([^)]*\)[^\s|]*|[^\s|]+/g;
+
+const sameSound = (a: Pitch[], b: Pitch[]) =>
+  a.length === b.length && a.every((p, i) => midiOf(p) === midiOf(b[i]));
 
 /**
  * Parse text like `q q e e q | h. qr | ~q h e e`, optionally with pitches:
@@ -78,49 +85,59 @@ const TOKEN = /^(~)?(?:([^/]+)\/)?([whqes])(\.)?(r)?$/;
  *   r          = rest (suffix)
  *   ~          = tied from the previous note (prefix); the pitch may be left out
  *   c4/        = pitch before the duration: letter, # or b (## bb), octave (C4 = middle C)
+ *   (c4 e4 g4)/ = a chord: several pitches sounding together
  *   |          = optional bar line (ignored; measures are split by duration)
  * Within one part, either every note has a pitch or none does.
  */
 export function parseRhythm(text: string): RNote[] {
-  const tokens = text.split(/[\s|]+/).filter(Boolean);
+  const tokens = text.match(TOKENIZE) ?? [];
   const notes: RNote[] = [];
   for (const tok of tokens) {
-    if (tok.startsWith('(')) throw new Error(`"${tok}": chords aren't supported yet.`);
-    const m = TOKEN.exec(tok.toLowerCase());
+    // Inside a chord, separate pitches with commas so the token has no spaces.
+    const norm = tok.toLowerCase().replace(/\(([^)]*)\)/, (_, inner: string) => `(${inner.trim().split(/[\s,]+/).join(',')})`);
+    const m = TOKEN.exec(norm);
     if (!m) {
-      throw new Error(`Unknown symbol "${tok}". Use w h q e s, "." for dotted, "r" for rest, "~" for tie, e.g. "q" or "c4/q".`);
+      throw new Error(`Unknown symbol "${tok}". Use w h q e s, "." for dotted, "r" for rest, "~" for tie, e.g. "q", "c4/q" or "(c4 e4 g4)/h".`);
     }
     const [, tie, pitchStr, base, dot, rest] = m;
-    let pitch: Pitch | undefined;
+    let pitches: Pitch[] | undefined;
     if (pitchStr) {
-      const p = parsePitch(pitchStr);
-      if (!p) throw new Error(`"${tok}": "${pitchStr}" isn't a pitch. Write a letter, optional # or b, and an octave, like c4, f#4, bb3.`);
+      // "c4" or a chord "(c4,e4,g4)".
+      const chord = /^\((.*)\)$/.exec(pitchStr);
+      const parts = chord ? chord[1].split(',').filter(Boolean) : [pitchStr];
+      pitches = parts.map((part) => {
+        const p = parsePitch(part);
+        if (!p) throw new Error(`"${tok}": "${part}" isn't a pitch. Write a letter, optional # or b, and an octave, like c4, f#4, bb3.`);
+        return p;
+      });
+      if (!pitches.length) throw new Error(`"${tok}": the chord is empty.`);
+      pitches.sort((a, b) => midiOf(a) - midiOf(b));
+      if (new Set(pitches.map(midiOf)).size < pitches.length) throw new Error(`"${tok}": the same key appears twice in the chord.`);
       if (rest) throw new Error(`"${tok}": a rest has no pitch.`);
-      pitch = p;
     }
     if (tie && rest) throw new Error(`"${tok}": a rest can't be tied.`);
     if (tie) {
       const prev = notes[notes.length - 1];
       if (!prev || prev.rest) throw new Error(`"${tok}": a tie needs a note before it.`);
-      if (pitch && prev.pitch && midiOf(pitch) !== midiOf(prev.pitch)) {
-        throw new Error(`"${tok}": a tie joins two notes of the same pitch.`);
+      if (pitches && prev.pitches && !sameSound(pitches, prev.pitches)) {
+        throw new Error(`"${tok}": a tie joins notes of the same pitch${prev.pitches.length > 1 ? 'es' : ''}.`);
       }
-      // "~q" after a pitched note continues that pitch.
-      pitch ??= prev.pitch;
+      // "~q" after a pitched note or chord continues it.
+      pitches ??= prev.pitches;
     }
-    notes.push(makeNote(base as Base, !!dot, !!rest, !!tie, pitch));
+    notes.push(makeNote(base as Base, !!dot, !!rest, !!tie, pitches));
   }
   if (notes.length === 0) throw new Error('The rhythm is empty.');
   const sounding = notes.filter((n) => !n.rest);
-  const pitched = sounding.filter((n) => n.pitch).length;
+  const pitched = sounding.filter((n) => n.pitches).length;
   if (pitched && pitched < sounding.length) {
-    throw new Error('Give every note a pitch (like c4/q), or none for a rhythm-only exercise.');
+    throw new Error('Give every note a pitch (like c4/q or (c4 e4 g4)/h), or none for a rhythm-only exercise.');
   }
   return notes;
 }
 
 export function isPitched(ex: Exercise): boolean {
-  return [...ex.rh, ...(ex.lh ?? [])].some((m) => m.some((n) => n.pitch));
+  return [...ex.rh, ...(ex.lh ?? [])].some((m) => m.some((n) => n.pitches));
 }
 
 /** Split a flat note list into measures. Throws if a note crosses a bar line. */
@@ -155,7 +172,8 @@ function fmtQuarters(q: number): string {
 }
 
 export function noteToText(n: RNote): string {
-  const pitch = n.pitch ? `${pitchText(n.pitch)}/` : '';
+  const ps = n.pitches?.map(pitchText);
+  const pitch = !ps ? '' : ps.length === 1 ? `${ps[0]}/` : `(${ps.join(' ')})/`;
   return `${n.tie ? '~' : ''}${pitch}${n.base}${n.dotted ? '.' : ''}${n.rest ? 'r' : ''}`;
 }
 
@@ -174,9 +192,9 @@ export function exerciseOnsets(ex: Exercise): Onset[] {
           pos += n.dur;
           return;
         }
-        const o: Onset = { hand, q: pos, measure: mi, index: ni, durQ: soundingQuarters(measures, mi, ni) };
-        if (n.pitch) o.midi = midiOf(n.pitch);
-        out.push(o);
+        const base = { hand, q: pos, measure: mi, index: ni, durQ: soundingQuarters(measures, mi, ni) };
+        if (!n.pitches) out.push({ ...base, tone: 0 });
+        else n.pitches.forEach((p, tone) => out.push({ ...base, tone, midi: midiOf(p) }));
         pos += n.dur;
       });
     });
@@ -331,7 +349,7 @@ function assignFiveFinger(measures: RNote[][], keyId: string, tonicOctave: numbe
   notes.forEach((n, i) => {
     if (n.rest) return;
     if (n.tie && prev) {
-      n.pitch = prev;
+      n.pitches = [prev];
       return;
     }
     if (!first) {
@@ -340,7 +358,8 @@ function assignFiveFinger(measures: RNote[][], keyId: string, tonicOctave: numbe
     }
     first = false;
     if (i === lastOnset) degree = 0;
-    prev = n.pitch = scalePitch(k, degree, tonicOctave);
+    prev = scalePitch(k, degree, tonicOctave);
+    n.pitches = [prev];
   });
 }
 

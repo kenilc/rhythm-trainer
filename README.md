@@ -36,8 +36,8 @@ q q e e q | h. qr | q. e ~q q
 ```
 
 **With pitches**, put the note before the duration: `c4/q d4/e e4/e f#4/h | ~f#4/q qr g4/h`.
-Letter, then `#` / `b` (or `##` / `bb`), then the octave (C4 = middle C). A tied note may leave the
-pitch out (`~q`). In one part, either every note has a pitch or none does. Pick the key signature
+Letter, then `#` / `b` (or `##` / `bb`), then the octave (C4 = middle C). Chords go in parentheses:
+`(c4 e4 g4)/h (d4 f#4 a4)/q`. A tied note or chord may leave the pitch out (`~q`). In one part, either every note has a pitch or none does. Pick the key signature
 under **Key**; only the accidentals the key and bar don't already imply are drawn.
 
 ### Pitched exercises
@@ -46,6 +46,11 @@ Set **Notes** to *Five-finger position* to generate notes in degrees 1–5 of th
 (right hand from the tonic at or above middle C, left hand an octave or so lower). With MIDI, a note
 played on time but on the wrong key shows in red beside the written one (with an accidental where
 needed) and scores no points; the timing is still graded. The laptop keyboard only checks timing.
+
+Each key of a chord is matched and graded on its own. Under the chord you see the average offset and
+the **spread** (`↔ 18`: ms from the first to the last key), coloured by how together it was; chord
+notes you didn't play get a red ring. The results show the average spread. In two-hand mode a key the
+exercise is waiting for counts for the hand it's written in, even across the split point.
 
 ### Grades (Normal strictness)
 

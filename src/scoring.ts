@@ -104,17 +104,32 @@ export class Session {
       this.expected.push({ ...o, rep, time: toTime(o.q), durSec: toTime(o.q + o.durQ) - toTime(o.q), window: 0 });
     }
     this.expected.sort((a, b) => a.time - b.time);
-    // Window: generous, but never more than ~half the gap to a neighbouring
-    // onset in the same hand, so each hit can only belong to one note. This
-    // also holds across the seam between repetitions.
+    // Window: generous, but never more than ~half the gap to the previous
+    // or next moment in the same hand, so each hit can only belong to one
+    // note (or chord). This also holds across the seam between repetitions.
     const maxWin = (this.thresholds.ok * 1.5) / 1000;
     for (const hand of ['R', 'L'] as Hand[]) {
-      const list = this.expected.filter((e) => e.hand === hand);
-      list.forEach((e, i) => {
-        const gaps = [list[i - 1], list[i + 1]].filter(Boolean).map((n) => Math.abs(n!.time - e.time));
-        e.window = gaps.length ? Math.min(maxWin, 0.49 * Math.min(...gaps)) : maxWin;
-      });
+      // Tones of a chord share a moment; gaps are between distinct moments.
+      const times = [...new Set(this.expected.filter((e) => e.hand === hand).map((e) => e.time))].sort((a, b) => a - b);
+      const win = new Map(
+        times.map((t, i) => {
+          const gaps = [times[i - 1], times[i + 1]].filter((n) => n !== undefined).map((n) => Math.abs(n - t));
+          return [t, gaps.length ? Math.min(maxWin, 0.49 * Math.min(...gaps)) : maxWin];
+        }),
+      );
+      for (const e of this.expected) if (e.hand === hand) e.window = win.get(e.time)!;
     }
+  }
+
+  /**
+   * The hand whose open note this key is, if exactly one hand is waiting for
+   * it right now. Lets a right-hand chord dip below the split point.
+   */
+  handForKey(midi: number, time: number): Hand | undefined {
+    const hands = new Set(
+      this.expected.filter((e) => e.midi === midi && !e.hit && !e.missed && Math.abs(time - e.time) <= e.window).map((e) => e.hand),
+    );
+    return hands.size === 1 ? [...hands][0] : undefined;
   }
 
   /**
@@ -124,8 +139,11 @@ export class Session {
    */
   registerHit(hand: Hand, time: number, label: string, extraRep = 0, played?: number): HitRecord {
     const open = this.expected.filter((e) => e.hand === hand && !e.hit && !e.missed && Math.abs(time - e.time) <= e.window);
-    const nearest = (list: Expected[]) =>
-      list.reduce<Expected | undefined>((b, e) => (!b || Math.abs(time - e.time) < Math.abs(time - b.time) ? e : b), undefined);
+    // Nearest in time; between tones of the same chord, nearest in pitch, so
+    // a wrong key takes the tone it most likely stands in for.
+    const cost = (e: Expected) =>
+      Math.abs(time - e.time) + (played !== undefined && e.midi !== undefined ? Math.abs(e.midi - played) * 1e-6 : 0);
+    const nearest = (list: Expected[]) => list.reduce<Expected | undefined>((b, e) => (!b || cost(e) < cost(b) ? e : b), undefined);
     const best = (played !== undefined && nearest(open.filter((e) => e.midi === played))) || nearest(open);
     let rec: HitRecord;
     if (best) {
@@ -187,6 +205,7 @@ export class Session {
       poor: count('poor'),
       missed: exp.filter((e) => !e.hit).length,
       wrongNotes: matched.filter((h) => h.wrongNote).length,
+      chordSpreadMs: chordSpread(exp),
       extra,
       meanMs: mean,
       sdMs: sd,
@@ -195,6 +214,30 @@ export class Session {
       score: exp.length ? Math.max(0, (points - extra * 0.5) / exp.length) : 0,
     };
   }
+}
+
+/** Expected tones grouped into the notes they belong to (a chord is one group). */
+export function noteGroups(expected: Expected[]): Expected[][] {
+  const groups = new Map<string, Expected[]>();
+  for (const e of expected) {
+    const k = `${e.rep}:${e.hand}:${e.measure}:${e.index}`;
+    groups.set(k, [...(groups.get(k) ?? []), e]);
+  }
+  return [...groups.values()];
+}
+
+/** ms between the first and last key played for one chord; undefined below 2 keys. */
+export function spreadOf(group: Expected[]): number | undefined {
+  const times = group.filter((e) => e.hit).map((e) => e.hit!.time);
+  return times.length > 1 ? (Math.max(...times) - Math.min(...times)) * 1000 : undefined;
+}
+
+function chordSpread(expected: Expected[]): number | undefined {
+  const spreads = noteGroups(expected)
+    .filter((g) => g.length > 1)
+    .map(spreadOf)
+    .filter((v): v is number => v !== undefined);
+  return spreads.length ? spreads.reduce((a, b) => a + b, 0) / spreads.length : undefined;
 }
 
 export interface ArticulationSummary {
@@ -213,6 +256,8 @@ export interface Summary {
   missed: number;
   extra: number;
   wrongNotes: number;
+  /** Average ms between the first and last key of chords, if any chord had 2+ keys played. */
+  chordSpreadMs?: number;
   meanMs: number;
   sdMs: number;
   score: number;

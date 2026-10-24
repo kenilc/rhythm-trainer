@@ -116,7 +116,8 @@
             <code>r</code> rest · <code>~</code> tie from previous · <code>|</code> bar line (optional).
             Example: <code>q q e e q | h. qr | q. e ~q q</code><br />
             With pitches, put the note before the duration: <code>c4/q d4/q e4/e f#4/e g4/q | g4/h ~g4/q qr</code>
-            (<code>#</code> sharp, <code>b</code> flat, C4 = middle C). Set the key signature under Key.
+            (<code>#</code> sharp, <code>b</code> flat, C4 = middle C). Chords go in parentheses:
+            <code>(c4 e4 g4)/h (d4 f#4 a4)/h</code>. Set the key signature under Key.
           </p>
           <label for="rh-text">Right hand</label>
           <textarea id="rh-text" rows="2" spellcheck="false"></textarea>
@@ -152,6 +153,8 @@
           <span><b class="miss">✕</b> missed</span>
           <span><b class="extra">+</b> extra hit</span>
           <span class="hint">Numbers are ms: <b>−</b> early, <b>+</b> late.</span>
+          <span class="hint" id="chord-legend" hidden><b>↔</b> chord spread: ms from first to last key ·
+            <b class="miss">red note</b> wrong key · <b class="miss">○</b> chord note not played</span>
         </div>
         <div class="legend">
           <span><i class="bar written"></i>written length</span>

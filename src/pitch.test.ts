@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { keyById, midiOf, parsePitch, pitchName, pitchText, scalePitch, scaleSpelling, spellMidi, staffLine } from './pitch';
 import { exerciseOnsets, generateExercise, measuresToText, parseRhythm, splitMeasures } from './rhythm';
-import { Session, STRICTNESS } from './scoring';
+import { Session, spreadOf, STRICTNESS } from './scoring';
 
 const m44 = { num: 4, den: 4 };
 const names = (k: string) => scaleSpelling(keyById(k)).map((s) => pitchName({ ...s, octave: 4 }).replace('4', ''));
@@ -51,7 +51,7 @@ describe('pitches', () => {
 describe('pitched rhythms', () => {
   it('parses pitches, round-trips and lets ties inherit the pitch', () => {
     const notes = parseRhythm('c4/q d4/e. f#4/s g4/h | ~q qr bb3/h');
-    expect(notes[3].pitch && notes[4].pitch && midiOf(notes[4].pitch)).toBe(67);
+    expect(notes[4].pitches?.map(midiOf)).toEqual([67]);
     const measures = splitMeasures(notes, m44);
     expect(measuresToText(measures)).toBe('c4/q d4/e. f#4/s g4/h | ~g4/q qr bb3/h');
     const onsets = exerciseOnsets({ meter: m44, key: 'C', rh: measures, lh: null });
@@ -63,7 +63,6 @@ describe('pitched rhythms', () => {
     expect(() => parseRhythm('x4/q')).toThrow(/isn't a pitch/);
     expect(() => parseRhythm('c4/q ~d4/q')).toThrow(/same pitch/);
     expect(() => parseRhythm('c4/qr')).toThrow(/rest has no pitch/);
-    expect(() => parseRhythm('(c4 e4)/q')).toThrow(/chords/);
   });
 
   it('generates five-finger notes in the key, ending on the tonic', () => {
@@ -84,6 +83,79 @@ describe('pitched rhythms', () => {
         expect(() => splitMeasures(parseRhythm(measuresToText(ex.rh)), m44)).not.toThrow();
       }
     }
+  });
+});
+
+describe('chords', () => {
+  it('parses chords with spaces or commas, sorts them and round-trips', () => {
+    const notes = parseRhythm('(g4 c4 e4)/h (d4,f#4)/e | ~(d4 f#4)/e ~q');
+    expect(notes[0].pitches?.map(midiOf)).toEqual([60, 64, 67]);
+    expect(notes[1].pitches?.map(midiOf)).toEqual([62, 66]);
+    expect(notes[3].pitches?.map(midiOf)).toEqual([62, 66]); // ~q inherits the chord
+    expect(measuresToText([notes])).toBe('(c4 e4 g4)/h (d4 f#4)/e ~(d4 f#4)/e ~(d4 f#4)/q');
+    expect(parseRhythm('(c4 e4)/q|d4/q')).toHaveLength(2); // bar line right after a chord
+  });
+
+  it('rejects bad chords', () => {
+    expect(() => parseRhythm('(c4 c4)/q')).toThrow(/twice/);
+    expect(() => parseRhythm('(c4 x9)/q')).toThrow(/isn't a pitch/);
+    expect(() => parseRhythm('(c4 e4)/q ~(c4 f4)/q')).toThrow(/same pitches/);
+  });
+
+  // (C E G) then (D F A), quarters at 120 BPM.
+  const rh = splitMeasures(parseRhythm('(c4 e4 g4)/q (d4 f4 a4)/q (c4 e4 g4)/h'), m44);
+  const onsets = exerciseOnsets({ meter: m44, key: 'C', rh, lh: null });
+  const toTime = (q: number) => q * 0.5;
+
+  it('has one onset per chord tone', () => {
+    expect(onsets).toHaveLength(9);
+    expect(onsets.filter((o) => o.q === 0).map((o) => o.tone)).toEqual([0, 1, 2]);
+  });
+
+  it('matches each key to its own tone and measures the spread', () => {
+    const s = new Session(onsets, toTime, STRICTNESS.normal);
+    [
+      [60, 0.0],
+      [67, 0.012],
+      [64, 0.03],
+    ].forEach(([m, t]) => expect(s.registerHit('R', t, 'k', 0, m).wrongNote).toBeUndefined());
+    expect(s.expected.filter((e) => e.q === 0).every((e) => e.hit)).toBe(true);
+    expect(spreadOf(s.expected.filter((e) => e.q === 0))).toBeCloseTo(30);
+  });
+
+  it('lets a wrong key take the nearest tone in pitch, whatever the order', () => {
+    const s = new Session(onsets, toTime, STRICTNESS.normal);
+    const a = s.registerHit('R', 0, 'A4', 0, 69); // wrong key first
+    s.registerHit('R', 0.01, 'C4', 0, 60);
+    s.registerHit('R', 0.01, 'E4', 0, 64);
+    expect(a.wrongNote).toBe(true);
+    expect(a.expected?.midi).toBe(67); // stood in for G, not C
+    const first = s.expected.filter((e) => e.q === 0);
+    expect(first.filter((e) => e.hit?.wrongNote).map((e) => e.midi)).toEqual([67]);
+  });
+
+  it('gives repeated chords their own windows and reports average spread', () => {
+    const s = new Session(onsets, toTime, STRICTNESS.normal);
+    // Second chord played 40 ms late, spread 20 ms: must not land on the first chord.
+    s.registerHit('R', 0.54, 'D4', 0, 62);
+    s.registerHit('R', 0.55, 'F4', 0, 65);
+    s.registerHit('R', 0.56, 'A4', 0, 69);
+    expect(s.expected.filter((e) => e.q === 1).every((e) => e.hit)).toBe(true);
+    s.sweepMisses(Infinity);
+    expect(s.summary().chordSpreadMs).toBeCloseTo(20);
+  });
+
+  it('works out the hand from the key when a part dips past the split', () => {
+    const both = exerciseOnsets({
+      meter: m44,
+      key: 'C',
+      rh: splitMeasures(parseRhythm('(b3 d4 g4)/w'), m44),
+      lh: splitMeasures(parseRhythm('g2/w'), m44),
+    });
+    const s = new Session(both, toTime, STRICTNESS.normal);
+    expect(s.handForKey(59, 0)).toBe('R'); // B3 is below middle C but written for the right hand
+    expect(s.handForKey(43, 0)).toBe('L');
+    expect(s.handForKey(50, 0)).toBeUndefined(); // not in the exercise
   });
 });
 

@@ -444,6 +444,12 @@ b.extra, .extra { color: var(--extra); }
   font-weight: 700;
 }
 
+.score ellipse.missed-tone {
+  fill: none;
+  stroke: var(--miss);
+  stroke-width: 1.8;
+}
+
 /* Duration lane: written length behind, held length on top. */
 .score rect.written {
   fill: var(--written);
