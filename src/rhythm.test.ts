@@ -45,13 +45,13 @@ describe('parseRhythm / splitMeasures', () => {
 describe('exerciseOnsets', () => {
   it('skips rests and tied continuations', () => {
     const rh = splitMeasures(parseRhythm('q qr h | ~q q h'), m44);
-    const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+    const onsets = exerciseOnsets({ meter: m44, key: 'C', rh, lh: null });
     expect(onsets.map((o) => o.q)).toEqual([0, 2, 5, 6]);
   });
 
   it('includes tied continuations in the written length', () => {
     const rh = splitMeasures(parseRhythm('q q h | ~q q h'), m44);
-    const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+    const onsets = exerciseOnsets({ meter: m44, key: 'C', rh, lh: null });
     expect(onsets.map((o) => o.durQ)).toEqual([1, 1, 3, 1, 2]);
   });
 });
@@ -61,7 +61,7 @@ describe('generateExercise', () => {
     for (const meter of METERS) {
       for (let level = 1; level <= 3; level++) {
         for (let i = 0; i < 30; i++) {
-          const ex = generateExercise({ meter, bars: 4, level, twoHands: true, lhPattern: 'random' });
+          const ex = generateExercise({ meter, key: 'C', notes: 'rhythm', bars: 4, level, twoHands: true, lhPattern: 'random' });
           for (const bar of [...ex.rh, ...ex.lh!]) {
             expect(bar.reduce((s, n) => s + n.dur, 0)).toBeCloseTo(measureQuarters(meter));
           }
@@ -75,7 +75,7 @@ describe('generateExercise', () => {
 
 describe('Session', () => {
   const rh = splitMeasures(parseRhythm('q q q q'), m44);
-  const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+  const onsets = exerciseOnsets({ meter: m44, key: 'C', rh, lh: null });
   const toTime = (q: number) => q * 0.5; // 120 BPM
 
   it('grades hits by offset and counts misses and extras', () => {
@@ -110,7 +110,7 @@ describe('articulation', () => {
 
   it('records hold length on release', () => {
     const rh = splitMeasures(parseRhythm('h h'), m44);
-    const s = new Session(exerciseOnsets({ meter: m44, rh, lh: null }), (q) => q * 0.5, STRICTNESS.normal);
+    const s = new Session(exerciseOnsets({ meter: m44, key: 'C', rh, lh: null }), (q) => q * 0.5, STRICTNESS.normal);
     const a = s.registerHit('R', 0, 'C4');
     s.registerRelease(a, 0.3); // 0.3 s of a 1 s half note
     const b = s.registerHit('R', 1, 'C4');
@@ -124,7 +124,7 @@ describe('articulation', () => {
 describe('Session repetitions (loop mode)', () => {
   // One bar of quarters at 120 BPM: 2 s per repetition, seamless.
   const rh = splitMeasures(parseRhythm('q q q q'), m44);
-  const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+  const onsets = exerciseOnsets({ meter: m44, key: 'C', rh, lh: null });
   const loop = () => {
     const s = new Session([], (q) => q, STRICTNESS.normal);
     for (let n = 0; n < 2; n++) s.addOnsets(onsets, (q) => n * 2 + q * 0.5, n);

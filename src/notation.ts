@@ -1,11 +1,14 @@
 // Renders the exercise with VexFlow and draws timing feedback on top.
-import { Beam, Dot, Formatter, Fraction, Renderer, Stave, StaveConnector, StaveNote, StaveTie, Voice } from 'vexflow';
+import { Accidental, Beam, Dot, Formatter, Fraction, Renderer, Stave, StaveConnector, StaveNote, StaveTie, Voice } from 'vexflow';
+import { keyById, midiOf, pitchName, scaleSpelling, staffLine, vfKey, type Pitch } from './pitch';
 import type { Exercise, Hand, RNote } from './rhythm';
-import { exerciseOnsets, measureQuarters } from './rhythm';
+import { exerciseOnsets, isPitched, measureQuarters } from './rhythm';
 import type { Articulation, Grade } from './scoring';
 
 const VF_DUR: Record<RNote['base'], string> = { w: 'w', h: 'h', q: 'q', e: '8', s: '16' };
 const SVG_NS = 'http://www.w3.org/2000/svg';
+
+type Clef = 'treble' | 'bass';
 
 interface Anchor {
   q: number;
@@ -23,8 +26,11 @@ interface MeasureSpan {
 }
 
 export interface RenderedScore {
-  /** Draw a graded hit under the note at (hand, measure, index). */
-  markHit(hand: Hand, measure: number, index: number, grade: Grade, deltaMs: number): void;
+  /**
+   * Draw a graded hit under the note at (hand, measure, index). With
+   * `wrongPitch`, also draw the note that was actually played.
+   */
+  markHit(hand: Hand, measure: number, index: number, grade: Grade, deltaMs: number, wrongPitch?: Pitch): void;
   markMiss(hand: Hand, measure: number, index: number): void;
   /** Draw an unmatched hit at its position in time (quarters from start). */
   markExtra(hand: Hand, q: number): void;
@@ -44,6 +50,11 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   const mq = measureQuarters(ex.meter);
   const twoHands = !!ex.lh;
   const timeSig = `${ex.meter.num}/${ex.meter.den}`;
+  const pitched = isPitched(ex);
+  // One hand: low parts read better in the bass clef.
+  const rhPitches = ex.rh.flat().filter((n) => n.pitch).map((n) => midiOf(n.pitch!));
+  const rhClef: Clef =
+    !twoHands && rhPitches.length && rhPitches.reduce((a, b) => a + b, 0) / rhPitches.length < 60 ? 'bass' : 'treble';
 
   // Notes are spaced in proportion to time, and every bar gets the same
   // note area, so one beat is the same width everywhere and the cursor
@@ -54,8 +65,14 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   const needArea = (i: number) => Math.max(20 + density(i) * 34, (mq / shortest(i)) * 30);
   // Where notes start in a plain stave, and how much a clef (+ time signature) adds.
   const plainNoteStart = new Stave(0, 0, 200).getNoteStartX();
-  const clefOnlyExtra = new Stave(0, 0, 200).addClef('treble').getNoteStartX() - plainNoteStart;
-  const clefExtra = new Stave(0, 0, 200).addClef('treble').addTimeSignature(timeSig).getNoteStartX() - plainNoteStart;
+  const lineStart = (withTime: boolean) => {
+    const st = new Stave(0, 0, 200).addClef('treble');
+    if (pitched) st.addKeySignature(ex.key);
+    if (withTime) st.addTimeSignature(timeSig);
+    return st.getNoteStartX() - plainNoteStart;
+  };
+  const clefOnlyExtra = lineStart(false);
+  const clefExtra = lineStart(true);
   // Room after the last note of a line so it doesn't sit on the bar line.
   const tail = plainNoteStart + 24;
   const left = 10;
@@ -67,10 +84,24 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   const lines: number[][] = [];
   for (let i = 0; i < nMeasures; i += perLine) lines.push(Array.from({ length: Math.min(perLine, nMeasures - i) }, (_, k) => i + k));
 
-  // Below each staff: marker row (dot + ms), then the duration lane.
-  const staffGap = 125;
+  // Vertical layout. Pitched notes can sit on ledger lines, so the space
+  // above and below each staff comes from the exercise's pitch range.
+  // Stave geometry: top line at y+40, bottom line at y+80 (VexFlow lines 5…1).
+  const clefOf: Record<Hand, Clef> = { R: rhClef, L: 'bass' };
+  const extent = (hand: Hand) => {
+    const ls = [...(hand === 'R' ? ex.rh : ex.lh ?? [])].flat().filter((n) => n.pitch).map((n) => staffLine(n.pitch!, clefOf[hand]));
+    const lo = Math.min(3, ...ls);
+    const hi = Math.max(3, ...ls);
+    return { above: Math.max(0, (hi - 5) * 10 + 8), below: Math.max(0, (1 - lo) * 10 + 8) };
+  };
+  const ext = { R: extent('R'), L: extent('L') };
   const laneOffset = 26;
-  const systemHeight = twoHands ? 285 : 160;
+  const rhY = Math.max(0, ext.R.above - 30);
+  const rhMarker = rhY + 80 + Math.max(32, ext.R.below + 20);
+  const lhY = Math.max(rhY + 125, rhMarker + laneOffset + 6 + 12 + ext.L.above - 40);
+  const lhMarker = lhY + 80 + Math.max(36, ext.L.below + 20);
+  const systemHeight = (twoHands ? lhMarker : rhMarker) + laneOffset + 6 + 18;
+
   const renderer = new Renderer(container as HTMLDivElement, Renderer.Backends.SVG);
   const height = lines.length * systemHeight + 10;
   renderer.resize(width, height);
@@ -85,25 +116,28 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   svg.style.height = 'auto';
 
   const noteAnchors = new Map<string, { x: number; y: number }>();
+  const staves = new Map<string, Stave>();
   const spans: MeasureSpan[] = [];
   const markerY: Record<Hand, number[]> = { R: [], L: [] };
   const lineBounds: { top: number; bottom: number; startQ: number; endQ: number }[] = [];
+  /** Last drawn note per hand, for ties across bar lines. */
+  const lastNote: Partial<Record<Hand, { note: StaveNote; line: number }>> = {};
 
   lines.forEach((measures, li) => {
     const y = li * systemHeight;
     let x = left;
     measures.forEach((mi, k) => {
-      // First line also carries the time signature.
+      // Every line starts with clef (and key); the first also has the time signature.
       const lead = k > 0 ? 0 : li === 0 ? clefExtra : clefOnlyExtra;
       const w = area + lead + (k === measures.length - 1 ? tail : 0);
-      const rhStave = new Stave(x, y, w);
-      const lhStave = twoHands ? new Stave(x, y + staffGap, w) : null;
+      const rhStave = new Stave(x, y + rhY, w);
+      const lhStave = twoHands ? new Stave(x, y + lhY, w) : null;
       if (k === 0) {
-        rhStave.addClef('treble');
-        lhStave?.addClef('bass');
-        if (li === 0) {
-          rhStave.addTimeSignature(timeSig);
-          lhStave?.addTimeSignature(timeSig);
+        for (const [st, clef] of [[rhStave, clefOf.R], [lhStave, clefOf.L]] as const) {
+          if (!st) continue;
+          st.addClef(clef);
+          if (pitched) st.addKeySignature(ex.key);
+          if (li === 0) st.addTimeSignature(timeSig);
         }
       }
       rhStave.setContext(ctx).draw();
@@ -114,10 +148,12 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       }
       if (lhStave) new StaveConnector(rhStave, lhStave).setType('singleRight').setContext(ctx).draw();
 
+      // Rhythm-only notes sit on the middle line.
       const parts: { hand: Hand; stave: Stave; notes: RNote[]; key: string }[] = [
-        { hand: 'R', stave: rhStave, notes: ex.rh[mi], key: 'b/4' },
+        { hand: 'R', stave: rhStave, notes: ex.rh[mi], key: rhClef === 'treble' ? 'b/4' : 'd/3' },
       ];
       if (lhStave && ex.lh) parts.push({ hand: 'L', stave: lhStave, notes: ex.lh[mi], key: 'd/3' });
+      parts.forEach((p) => staves.set(`${p.hand}:${mi}`, p.stave));
 
       const startX = Math.max(...parts.map((p) => p.stave.getNoteStartX()));
       parts.forEach((p) => p.stave.setNoteStartX(startX));
@@ -125,11 +161,12 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       const built = parts.map((p) => {
         const vfNotes = p.notes.map((n) => {
           const sn = new StaveNote({
-            keys: [p.key],
+            keys: [n.pitch ? vfKey(n.pitch) : p.key],
             duration: VF_DUR[n.base],
             dots: n.dotted ? 1 : 0,
             type: n.rest ? 'r' : 'n',
-            clef: p.hand === 'R' ? 'treble' : 'bass',
+            clef: clefOf[p.hand],
+            auto_stem: !!n.pitch,
           });
           if (n.dotted) Dot.buildAndAttach([sn], { all: true });
           // Attach now so positions can be read before drawing.
@@ -139,6 +176,8 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
         const voice = new Voice({ num_beats: ex.meter.num, beat_value: ex.meter.den });
         voice.setMode(Voice.Mode.SOFT);
         voice.addTickables(vfNotes);
+        // Shows only the accidentals the key signature and the bar don't already imply.
+        if (pitched) Accidental.applyAccidentals([voice], ex.key);
         // Beam per quarter beat in every meter: easiest to read at this level.
         const beams = Beam.generateBeams(vfNotes, { groups: [new Fraction(1, 4)] });
         return { ...p, vfNotes, voice, beams };
@@ -171,13 +210,20 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
         b.voice.draw(ctx, b.stave);
         b.beams.forEach((beam) => beam.setContext(ctx).draw());
         b.notes.forEach((n, ni) => {
-          if (n.tie && ni > 0) {
-            new StaveTie({ first_note: b.vfNotes[ni - 1], last_note: b.vfNotes[ni], first_indices: [0], last_indices: [0] })
-              .setContext(ctx)
-              .draw();
+          const cur = b.vfNotes[ni];
+          if (n.tie) {
+            const prev = ni > 0 ? { note: b.vfNotes[ni - 1], line: li } : lastNote[b.hand];
+            if (prev?.line === li) {
+              new StaveTie({ first_note: prev.note, last_note: cur, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+            } else if (prev) {
+              // Across a line break: a tie out of the old line and one into the new.
+              new StaveTie({ first_note: prev.note, last_note: null, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+              new StaveTie({ first_note: null, last_note: cur, first_indices: [0], last_indices: [0] }).setContext(ctx).draw();
+            }
           }
         });
-        const my = b.stave.getBottomLineY() + (b.hand === 'R' ? 22 : 26);
+        lastNote[b.hand] = { note: b.vfNotes[b.vfNotes.length - 1], line: li };
+        const my = y + (b.hand === 'R' ? rhMarker : lhMarker);
         markerY[b.hand][li] = my;
         b.notes.forEach((_, ni) => {
           const sn = b.vfNotes[ni];
@@ -188,14 +234,12 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       x += w;
     });
     lineBounds.push({
-      top: y + 30,
-      bottom: y + (twoHands ? staffGap : 0) + 90,
+      top: y + rhY + 30,
+      bottom: y + (twoHands ? lhY : rhY) + 90,
       startQ: measures[0] * mq,
       endQ: (measures[measures.length - 1] + 1) * mq,
     });
   });
-
-  drawCrossBarTies(ex, noteAnchors, svg);
 
   const group = (cls: string) => {
     const g = document.createElementNS(SVG_NS, 'g');
@@ -227,6 +271,49 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     c.setAttribute('r', '5');
     c.setAttribute('class', cls);
     marks.appendChild(c);
+  };
+
+  /** The note that was played instead, drawn in red beside the written one. */
+  const ghostNote = (stave: Stave, clef: Clef, x: number, p: Pitch) => {
+    const line = staffLine(p, clef);
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', 'wrong-note');
+    // Offset by a head width, like the upper note of a second in a chord.
+    const gx = x + 11;
+    // Ledger lines for notes off the staff.
+    for (let l = 0; l >= line; l--) ledger(g, gx, stave.getYForNote(l));
+    for (let l = 6; l <= line; l++) ledger(g, gx, stave.getYForNote(l));
+    const head = document.createElementNS(SVG_NS, 'ellipse');
+    head.setAttribute('cx', String(gx));
+    head.setAttribute('cy', String(stave.getYForNote(line)));
+    head.setAttribute('rx', '5.5');
+    head.setAttribute('ry', '4');
+    head.setAttribute('transform', `rotate(-20 ${gx} ${stave.getYForNote(line)})`);
+    g.appendChild(head);
+    // An accidental when the played note differs from what the key implies
+    // (e.g. B♮ in F major), so B and B♭ don't look the same.
+    const keyAlter = scaleSpelling(keyById(ex.key)).find((s) => s.step === p.step)?.alter ?? 0;
+    if (p.alter !== keyAlter) {
+      const t = document.createElementNS(SVG_NS, 'text');
+      // Left of the written note, where accidentals go.
+      t.setAttribute('x', String(x - 8));
+      t.setAttribute('y', String(stave.getYForNote(line) + 5));
+      t.setAttribute('text-anchor', 'end');
+      t.textContent = { [-2]: '𝄫', [-1]: '♭', 0: '♮', 1: '♯', 2: '𝄪' }[p.alter] ?? '';
+      g.appendChild(t);
+    }
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = `Played ${pitchName(p)}`;
+    g.appendChild(title);
+    marks.appendChild(g);
+  };
+  const ledger = (g: SVGGElement, x: number, y: number) => {
+    const l = document.createElementNS(SVG_NS, 'line');
+    l.setAttribute('x1', String(x - 9));
+    l.setAttribute('x2', String(x + 9));
+    l.setAttribute('y1', String(y));
+    l.setAttribute('y2', String(y));
+    g.appendChild(l);
   };
 
   /** x position of a moment in time; the same for both hands. */
@@ -273,12 +360,14 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       holdEls.get(id)?.forEach((r) => r.remove());
       holdEls.set(id, span(holds, hand, q0, Math.max(q1, q0 + 0.02), `held ${kind}`));
     },
-    markHit(hand, measure, index, grade, deltaMs) {
+    markHit(hand, measure, index, grade, deltaMs, wrongPitch) {
       const a = noteAnchors.get(`${hand}:${measure}:${index}`);
       if (!a) return;
       dot(a.x, a.y, `mark ${grade}`);
       const ms = Math.round(deltaMs);
       label(a.x, a.y, `${ms > 0 ? '+' : ''}${ms}`, `mark-text ${grade}`);
+      const stave = staves.get(`${hand}:${measure}`);
+      if (wrongPitch && stave) ghostNote(stave, clefOf[hand], a.x, wrongPitch);
     },
     markMiss(hand, measure, index) {
       const a = noteAnchors.get(`${hand}:${measure}:${index}`);
@@ -312,35 +401,4 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       holdEls.clear();
     },
   };
-}
-
-/** Ties whose first note is in the previous measure (VexFlow ties are per-measure above). */
-function drawCrossBarTies(ex: Exercise, anchors: Map<string, { x: number; y: number }>, svg: SVGSVGElement): void {
-  const hands: [Hand, RNote[][] | null][] = [
-    ['R', ex.rh],
-    ['L', ex.lh],
-  ];
-  for (const [hand, measures] of hands) {
-    measures?.forEach((notes, mi) => {
-      if (mi === 0 || !notes[0]?.tie) return;
-      const prevIdx = measures[mi - 1].length - 1;
-      const from = anchors.get(`${hand}:${mi - 1}:${prevIdx}`);
-      const to = anchors.get(`${hand}:${mi}:0`);
-      if (!from || !to) return;
-      // Note heads sit on the middle staff line, a fixed distance above the marker row.
-      const lift = hand === 'R' ? 42 : 46;
-      const y = from.y - lift;
-      const y2 = to.y - lift;
-      const path = document.createElementNS(SVG_NS, 'path');
-      if (Math.abs(y - y2) > 1) {
-        // Bar line falls on a line break: draw two half ties.
-        path.setAttribute('d', `M${from.x + 6},${y + 6} q 14,8 28,0 M${to.x - 34},${y2 + 6} q 14,8 28,0`);
-      } else {
-        const mid = (from.x + to.x) / 2;
-        path.setAttribute('d', `M${from.x + 6},${y + 6} Q${mid},${y + 16} ${to.x - 6},${y2 + 6}`);
-      }
-      path.setAttribute('class', 'xtie');
-      svg.appendChild(path);
-    });
-  }
 }

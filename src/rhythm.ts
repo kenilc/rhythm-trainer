@@ -1,5 +1,7 @@
 // Rhythm model, text parser and random generator.
-// Durations are measured in quarter notes ("q" = 1).
+// Durations are measured in quarter notes ("q" = 1). Notes may carry a
+// pitch; exercises without pitches are pure rhythm.
+import { keyById, midiOf, parsePitch, pitchText, scalePitch, type Pitch } from './pitch';
 
 export type Base = 'w' | 'h' | 'q' | 'e' | 's';
 
@@ -10,6 +12,8 @@ export interface RNote {
   /** Tied from the previous note: sounds as a continuation, no new onset. */
   tie: boolean;
   dur: number;
+  /** Absent for rests and in rhythm-only exercises. */
+  pitch?: Pitch;
 }
 
 export interface Meter {
@@ -21,6 +25,8 @@ export type Hand = 'R' | 'L';
 
 export interface Exercise {
   meter: Meter;
+  /** Key signature (a KeyDef id); only matters when notes have pitches. */
+  key: string;
   /** Notes per hand, split into measures. LH is null in one-hand mode. */
   rh: RNote[][];
   lh: RNote[][] | null;
@@ -34,6 +40,8 @@ export interface Onset {
   index: number;
   /** Written length in quarters, including notes tied onto it. */
   durQ: number;
+  /** MIDI note expected, for pitched exercises. */
+  midi?: number;
 }
 
 const BASE_DUR: Record<Base, number> = { w: 4, h: 2, q: 1, e: 0.5, s: 0.25 };
@@ -54,36 +62,65 @@ export function beatQuarters(m: Meter): number {
   return 4 / m.den;
 }
 
-export function makeNote(base: Base, dotted = false, rest = false, tie = false): RNote {
-  return { base, dotted, rest, tie, dur: BASE_DUR[base] * (dotted ? 1.5 : 1) };
+export function makeNote(base: Base, dotted = false, rest = false, tie = false, pitch?: Pitch): RNote {
+  const n: RNote = { base, dotted, rest, tie, dur: BASE_DUR[base] * (dotted ? 1.5 : 1) };
+  if (pitch) n.pitch = pitch;
+  return n;
 }
 
-const TOKEN = /^(~)?([whqes])(\.)?(r)?$/;
+const TOKEN = /^(~)?(?:([^/]+)\/)?([whqes])(\.)?(r)?$/;
 
 /**
- * Parse text like `q q e e q | h. qr | ~q h e e`.
+ * Parse text like `q q e e q | h. qr | ~q h e e`, optionally with pitches:
+ * `c4/q d4/e e4/e | f#4/h ~f#4/q qr`.
  *   w h q e s  = whole, half, quarter, eighth, sixteenth
  *   .          = dotted (suffix)
  *   r          = rest (suffix)
- *   ~          = tied from the previous note (prefix)
+ *   ~          = tied from the previous note (prefix); the pitch may be left out
+ *   c4/        = pitch before the duration: letter, # or b (## bb), octave (C4 = middle C)
  *   |          = optional bar line (ignored; measures are split by duration)
+ * Within one part, either every note has a pitch or none does.
  */
 export function parseRhythm(text: string): RNote[] {
   const tokens = text.split(/[\s|]+/).filter(Boolean);
   const notes: RNote[] = [];
   for (const tok of tokens) {
+    if (tok.startsWith('(')) throw new Error(`"${tok}": chords aren't supported yet.`);
     const m = TOKEN.exec(tok.toLowerCase());
-    if (!m) throw new Error(`Unknown symbol "${tok}". Use w h q e s, "." for dotted, "r" for rest, "~" for tie.`);
-    const [, tie, base, dot, rest] = m;
+    if (!m) {
+      throw new Error(`Unknown symbol "${tok}". Use w h q e s, "." for dotted, "r" for rest, "~" for tie, e.g. "q" or "c4/q".`);
+    }
+    const [, tie, pitchStr, base, dot, rest] = m;
+    let pitch: Pitch | undefined;
+    if (pitchStr) {
+      const p = parsePitch(pitchStr);
+      if (!p) throw new Error(`"${tok}": "${pitchStr}" isn't a pitch. Write a letter, optional # or b, and an octave, like c4, f#4, bb3.`);
+      if (rest) throw new Error(`"${tok}": a rest has no pitch.`);
+      pitch = p;
+    }
     if (tie && rest) throw new Error(`"${tok}": a rest can't be tied.`);
     if (tie) {
       const prev = notes[notes.length - 1];
       if (!prev || prev.rest) throw new Error(`"${tok}": a tie needs a note before it.`);
+      if (pitch && prev.pitch && midiOf(pitch) !== midiOf(prev.pitch)) {
+        throw new Error(`"${tok}": a tie joins two notes of the same pitch.`);
+      }
+      // "~q" after a pitched note continues that pitch.
+      pitch ??= prev.pitch;
     }
-    notes.push(makeNote(base as Base, !!dot, !!rest, !!tie));
+    notes.push(makeNote(base as Base, !!dot, !!rest, !!tie, pitch));
   }
   if (notes.length === 0) throw new Error('The rhythm is empty.');
+  const sounding = notes.filter((n) => !n.rest);
+  const pitched = sounding.filter((n) => n.pitch).length;
+  if (pitched && pitched < sounding.length) {
+    throw new Error('Give every note a pitch (like c4/q), or none for a rhythm-only exercise.');
+  }
   return notes;
+}
+
+export function isPitched(ex: Exercise): boolean {
+  return [...ex.rh, ...(ex.lh ?? [])].some((m) => m.some((n) => n.pitch));
 }
 
 /** Split a flat note list into measures. Throws if a note crosses a bar line. */
@@ -118,7 +155,8 @@ function fmtQuarters(q: number): string {
 }
 
 export function noteToText(n: RNote): string {
-  return `${n.tie ? '~' : ''}${n.base}${n.dotted ? '.' : ''}${n.rest ? 'r' : ''}`;
+  const pitch = n.pitch ? `${pitchText(n.pitch)}/` : '';
+  return `${n.tie ? '~' : ''}${pitch}${n.base}${n.dotted ? '.' : ''}${n.rest ? 'r' : ''}`;
 }
 
 export function measuresToText(measures: RNote[][]): string {
@@ -132,7 +170,13 @@ export function exerciseOnsets(ex: Exercise): Onset[] {
     measures.forEach((notes, mi) => {
       let pos = mi * mq;
       notes.forEach((n, ni) => {
-        if (!n.rest && !n.tie) out.push({ hand, q: pos, measure: mi, index: ni, durQ: soundingQuarters(measures, mi, ni) });
+        if (n.rest || n.tie) {
+          pos += n.dur;
+          return;
+        }
+        const o: Onset = { hand, q: pos, measure: mi, index: ni, durQ: soundingQuarters(measures, mi, ni) };
+        if (n.pitch) o.midi = midiOf(n.pitch);
+        out.push(o);
         pos += n.dur;
       });
     });
@@ -259,8 +303,51 @@ function lhMeasure(meter: Meter, pattern: LhPattern, level: number, rng: Rng): R
   }
 }
 
+export type NotesMode = 'rhythm' | 'five';
+
+export const NOTES_MODE_NAMES: Record<NotesMode, string> = {
+  rhythm: 'Rhythm only',
+  five: 'Five-finger position',
+};
+
+/**
+ * Give every note a pitch in the five-finger position (degrees 1–5) of the
+ * key: mostly steps, some skips and repeats, ending on the tonic.
+ */
+function assignFiveFinger(measures: RNote[][], keyId: string, tonicOctave: number, rng: Rng): void {
+  const k = keyById(keyId);
+  const notes = measures.flat();
+  const lastOnset = notes.findLastIndex((n) => !n.rest && !n.tie);
+  const moves = [
+    { d: -2, weight: 1 },
+    { d: -1, weight: 4 },
+    { d: 0, weight: 1 },
+    { d: 1, weight: 4 },
+    { d: 2, weight: 1 },
+  ];
+  let degree = [0, 0, 2, 4][Math.floor(rng() * 4)];
+  let prev: Pitch | undefined;
+  let first = true;
+  notes.forEach((n, i) => {
+    if (n.rest) return;
+    if (n.tie && prev) {
+      n.pitch = prev;
+      return;
+    }
+    if (!first) {
+      const options = moves.filter((m) => degree + m.d >= 0 && degree + m.d <= 4);
+      degree += pickWeighted(options, rng).d;
+    }
+    first = false;
+    if (i === lastOnset) degree = 0;
+    prev = n.pitch = scalePitch(k, degree, tonicOctave);
+  });
+}
+
 export interface GenerateOptions {
   meter: Meter;
+  key: string;
+  notes: NotesMode;
   bars: number;
   level: number;
   twoHands: boolean;
@@ -276,5 +363,12 @@ export function generateExercise(o: GenerateOptions): Exercise {
     rh.push(generateMeasure(o.meter, o.level, rng));
     if (o.twoHands) lh.push(lhMeasure(o.meter, o.lhPattern, o.level, rng));
   }
-  return { meter: o.meter, rh, lh: o.twoHands ? lh : null };
+  if (o.notes === 'five') {
+    // Right hand from the tonic at or above middle C; left hand in the
+    // usual beginner position, roughly C3–G3 or just below.
+    assignFiveFinger(rh, o.key, 4, rng);
+    const lowTonic = ['c', 'd', 'e'].includes(keyById(o.key).tonic.step);
+    if (o.twoHands) assignFiveFinger(lh, o.key, lowTonic ? 3 : 2, rng);
+  }
+  return { meter: o.meter, key: o.key, rh, lh: o.twoHands ? lh : null };
 }

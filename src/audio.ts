@@ -1,6 +1,7 @@
 // Web Audio clock, click sounds and the free-running metronome.
 // Everything is scheduled on the audio clock, never with timers, so clicks
 // are sample-accurate.
+import { midiToFreq } from './pitch';
 
 export type ClickKind = 'accent' | 'beat' | 'sub';
 
@@ -52,13 +53,13 @@ export function click(bus: AudioNode, time: number, kind: ClickKind): void {
   osc.stop(time + 0.05);
 }
 
-/** A short pitched tone used to demo the rhythm ("Listen"). */
-export function tone(bus: AudioNode, time: number, hand: 'R' | 'L', durSec: number): void {
+/** A short tone used to demo the exercise ("Listen"); at the written pitch if there is one. */
+export function tone(bus: AudioNode, time: number, hand: 'R' | 'L', durSec: number, midi?: number): void {
   const c = audioCtx();
   const osc = c.createOscillator();
   const env = c.createGain();
   osc.type = 'triangle';
-  osc.frequency.value = hand === 'R' ? 784 : 262;
+  osc.frequency.value = midi !== undefined ? midiToFreq(midi) : hand === 'R' ? 784 : 262;
   const len = Math.min(Math.max(durSec * 0.8, 0.06), 0.5);
   env.gain.setValueAtTime(0, time);
   env.gain.linearRampToValueAtTime(0.5, time + 0.004);

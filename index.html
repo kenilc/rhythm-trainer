@@ -95,6 +95,14 @@
               <option>8</option>
             </select>
           </div>
+          <div class="field">
+            <label for="notes">Notes</label>
+            <select id="notes"></select>
+          </div>
+          <div class="field" id="key-field">
+            <label for="key">Key</label>
+            <select id="key"></select>
+          </div>
           <div class="field" id="lh-pattern-field">
             <label for="lh-pattern">Left hand</label>
             <select id="lh-pattern"></select>
@@ -106,7 +114,9 @@
           <p class="hint">
             <code>w h q e s</code> = whole, half, quarter, eighth, sixteenth · <code>.</code> dotted ·
             <code>r</code> rest · <code>~</code> tie from previous · <code>|</code> bar line (optional).
-            Example: <code>q q e e q | h. qr | q. e ~q q</code>
+            Example: <code>q q e e q | h. qr | q. e ~q q</code><br />
+            With pitches, put the note before the duration: <code>c4/q d4/q e4/e f#4/e g4/q | g4/h ~g4/q qr</code>
+            (<code>#</code> sharp, <code>b</code> flat, C4 = middle C). Set the key signature under Key.
           </p>
           <label for="rh-text">Right hand</label>
           <textarea id="rh-text" rows="2" spellcheck="false"></textarea>

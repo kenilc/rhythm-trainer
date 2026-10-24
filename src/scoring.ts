@@ -60,6 +60,10 @@ export interface HitRecord {
   expected?: Expected;
   /** Repetition this hit counts towards. */
   rep: number;
+  /** MIDI note played, when known (MIDI input). */
+  played?: number;
+  /** On time for a note, but not the written pitch. Scores no points. */
+  wrongNote?: boolean;
   /** Release time (audio clock, latency-compensated); undefined while held. */
   release?: number;
   /** Held time ÷ written length, for matched hits. */
@@ -114,16 +118,15 @@ export class Session {
   }
 
   /**
-   * Match a hit to the nearest open note of that hand. `extraRep` is the
-   * repetition an unmatched hit is charged to.
+   * Match a hit to the nearest open note of that hand, preferring one with
+   * the pitch played. `extraRep` is the repetition an unmatched hit is
+   * charged to; `played` is the MIDI note, if known.
    */
-  registerHit(hand: Hand, time: number, label: string, extraRep = 0): HitRecord {
-    let best: Expected | undefined;
-    for (const e of this.expected) {
-      if (e.hand !== hand || e.hit || e.missed) continue;
-      const d = Math.abs(time - e.time);
-      if (d <= e.window && (!best || d < Math.abs(time - best.time))) best = e;
-    }
+  registerHit(hand: Hand, time: number, label: string, extraRep = 0, played?: number): HitRecord {
+    const open = this.expected.filter((e) => e.hand === hand && !e.hit && !e.missed && Math.abs(time - e.time) <= e.window);
+    const nearest = (list: Expected[]) =>
+      list.reduce<Expected | undefined>((b, e) => (!b || Math.abs(time - e.time) < Math.abs(time - b.time) ? e : b), undefined);
+    const best = (played !== undefined && nearest(open.filter((e) => e.midi === played))) || nearest(open);
     let rec: HitRecord;
     if (best) {
       const deltaMs = (time - best.time) * 1000;
@@ -132,6 +135,8 @@ export class Session {
     } else {
       rec = { hand, time, label, grade: 'extra', rep: extraRep };
     }
+    if (played !== undefined) rec.played = played;
+    if (best?.midi !== undefined && played !== undefined && best.midi !== played) rec.wrongNote = true;
     this.hits.push(rec);
     return rec;
   }
@@ -172,7 +177,7 @@ export class Session {
     const mean = deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 0;
     const sd = deltas.length > 1 ? Math.sqrt(deltas.reduce((a, b) => a + (b - mean) ** 2, 0) / (deltas.length - 1)) : 0;
     const count = (g: Grade) => matched.filter((h) => h.grade === g).length;
-    const points = matched.reduce((s, h) => s + GRADE_POINTS[h.grade as Grade], 0);
+    const points = matched.reduce((s, h) => s + (h.wrongNote ? 0 : GRADE_POINTS[h.grade as Grade]), 0);
     const extra = hits.length - matched.length;
     return {
       total: exp.length,
@@ -181,6 +186,7 @@ export class Session {
       ok: count('ok'),
       poor: count('poor'),
       missed: exp.filter((e) => !e.hit).length,
+      wrongNotes: matched.filter((h) => h.wrongNote).length,
       extra,
       meanMs: mean,
       sdMs: sd,
@@ -206,6 +212,7 @@ export interface Summary {
   poor: number;
   missed: number;
   extra: number;
+  wrongNotes: number;
   meanMs: number;
   sdMs: number;
   score: number;

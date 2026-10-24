@@ -35,6 +35,18 @@ Keyboard fallback: `A S D F` = left hand, `J K L ;` / Space = right hand.
 q q e e q | h. qr | q. e ~q q
 ```
 
+**With pitches**, put the note before the duration: `c4/q d4/e e4/e f#4/h | ~f#4/q qr g4/h`.
+Letter, then `#` / `b` (or `##` / `bb`), then the octave (C4 = middle C). A tied note may leave the
+pitch out (`~q`). In one part, either every note has a pitch or none does. Pick the key signature
+under **Key**; only the accidentals the key and bar don't already imply are drawn.
+
+### Pitched exercises
+
+Set **Notes** to *Five-finger position* to generate notes in degrees 1–5 of the chosen key
+(right hand from the tonic at or above middle C, left hand an octave or so lower). With MIDI, a note
+played on time but on the wrong key shows in red beside the written one (with an accidental where
+needed) and scores no points; the timing is still graded. The laptop keyboard only checks timing.
+
 ### Grades (Normal strictness)
 
 perfect ≤ 25 ms · good ≤ 50 ms · ok ≤ 100 ms · poor beyond that · missed · extra (an unexpected hit).
@@ -51,6 +63,7 @@ counts; the sustain pedal is ignored.
 ## Code
 
 - `src/rhythm.ts`: rhythm model, text parser, level-based generator
+- `src/pitch.ts`: pitches, keys, scale spelling
 - `src/scoring.ts`: matches hits to notes and grades them
 - `src/audio.ts`: Web Audio clock, clicks, metronome
 - `src/input.ts`: MIDI and keyboard input behind one interface (the place to add an iPad bridge)

@@ -1,12 +1,16 @@
 import { audioCtx, click, makeBus, Metronome, perfToAudio, tone } from './audio';
 import { InputManager, midiNoteName, type MidiStatus, type RawHit } from './input';
 import { renderScore, type RenderedScore } from './notation';
+import { KEYS, keyById, pitchName, spellMidi } from './pitch';
 import {
   beatQuarters,
   exerciseOnsets,
   generateExercise,
   LEVEL_NAMES,
+  isPitched,
   LH_PATTERN_NAMES,
+  NOTES_MODE_NAMES,
+  type NotesMode,
   MAX_LEVEL,
   measureQuarters,
   measuresToText,
@@ -44,6 +48,9 @@ interface Settings {
   level: number;
   bars: number;
   lhPattern: LhPattern;
+  notes: NotesMode;
+  /** Key signature (KeyDef id) for pitched exercises. */
+  key: string;
   /** 1 = play once, 0 = loop until stopped, otherwise that many times. */
   repeats: number;
   /** One bar of rest (with clicks) between repetitions. */
@@ -62,6 +69,8 @@ const DEFAULTS: Settings = {
   level: 1,
   bars: 4,
   lhPattern: 'steady',
+  notes: 'rhythm',
+  key: 'C',
   repeats: 1,
   restBar: false,
 };
@@ -102,6 +111,8 @@ const subdivide = $<HTMLInputElement>('subdivide');
 const levelSel = $<HTMLSelectElement>('level');
 const barsSel = $<HTMLSelectElement>('bars');
 const lhPatternSel = $<HTMLSelectElement>('lh-pattern');
+const notesSel = $<HTMLSelectElement>('notes');
+const keySel = $<HTMLSelectElement>('key');
 const repeatsSel = $<HTMLSelectElement>('repeats');
 const restBar = $<HTMLInputElement>('rest-bar');
 const rhText = $<HTMLTextAreaElement>('rh-text');
@@ -124,6 +135,8 @@ const opt = (sel: HTMLSelectElement, value: string, text: string) => {
 METERS.forEach((m) => opt(meterSel, `${m.num}/${m.den}`, `${m.num}/${m.den}${m.num === 2 && m.den === 2 ? ' (cut time)' : ''}`));
 for (let l = 1; l <= MAX_LEVEL; l++) opt(levelSel, String(l), LEVEL_NAMES[l]);
 (Object.keys(LH_PATTERN_NAMES) as LhPattern[]).forEach((k) => opt(lhPatternSel, k, LH_PATTERN_NAMES[k]));
+(Object.keys(NOTES_MODE_NAMES) as NotesMode[]).forEach((k) => opt(notesSel, k, NOTES_MODE_NAMES[k]));
+KEYS.forEach((k) => opt(keySel, k.id, k.label));
 for (let n = 48; n <= 72; n++) opt(splitSel, String(n), `${midiNoteName(n)} and above = right hand`);
 
 function syncControls(): void {
@@ -137,6 +150,10 @@ function syncControls(): void {
   levelSel.value = String(settings.level);
   barsSel.value = String(settings.bars);
   lhPatternSel.value = settings.lhPattern;
+  notesSel.value = settings.notes;
+  keySel.value = settings.key;
+  // The key matters for generated notes and for pitched rhythms typed in.
+  $('key-field').hidden = settings.notes === 'rhythm' && !(exercise && isPitched(exercise));
   repeatsSel.value = String(settings.repeats);
   restBar.checked = settings.restBar;
   $('rest-bar-field').hidden = settings.repeats === 1;
@@ -147,9 +164,11 @@ function syncControls(): void {
   $('lh-text-wrap').hidden = !settings.twoHands;
   $('split-field').hidden = !settings.twoHands;
   $('bpm-unit').textContent = meterOf(settings.meter).den === 2 ? '(𝅗𝅥 = BPM)' : '(♩ = BPM)';
-  $('keys-hint').textContent = settings.twoHands
-    ? 'Keyboard fallback: left hand A S D F · right hand J K L ; / Space'
-    : 'Keyboard fallback: Space or J K L';
+  $('keys-hint').textContent =
+    (settings.twoHands
+      ? 'Keyboard fallback: left hand A S D F · right hand J K L ; / Space'
+      : 'Keyboard fallback: Space or J K L') +
+    (exercise && isPitched(exercise) ? ' (timing only: checking notes needs MIDI)' : '');
   $('latency-text').textContent = latencyMs === null ? 'not calibrated' : `${Math.round(latencyMs)} ms`;
 }
 
@@ -169,6 +188,7 @@ function setExercise(ex: Exercise): void {
   laidOutWidth = scoreEl.clientWidth;
   $('results').hidden = true;
   showBeat('Ready', '');
+  syncControls();
 }
 
 function generate(): void {
@@ -179,6 +199,8 @@ function generate(): void {
       level: settings.level,
       twoHands: settings.twoHands,
       lhPattern: settings.lhPattern,
+      notes: settings.notes,
+      key: settings.key,
     }),
   );
 }
@@ -196,7 +218,7 @@ function applyCustom(): void {
       }
       if (lh.length !== rh.length) throw new Error(`Right hand has ${rh.length} bars but left hand has ${lh.length}.`);
     }
-    setExercise({ meter, rh, lh });
+    setExercise({ meter, key: settings.key, rh, lh });
   } catch (e) {
     parseError.textContent = (e as Error).message;
   }
@@ -348,7 +370,7 @@ function scheduleAhead(): void {
     if (r.session) {
       r.session.addOnsets(onsets, (q) => t0 + q * r.quarterSec, n);
     } else {
-      for (const o of onsets) tone(r.bus, t0 + o.q * r.quarterSec, o.hand, o.durQ * r.quarterSec);
+      for (const o of onsets) tone(r.bus, t0 + o.q * r.quarterSec, o.hand, o.durQ * r.quarterSec, o.midi);
     }
   }
   // Once the last repetition is scheduled, the end is known: after its
@@ -517,13 +539,15 @@ function onHit(h: RawHit): void {
   // Ignore stray notes during the count-in.
   if (t < r.exStart - 0.25 || t > r.end) return;
   const hand = handFor(h);
-  const rec = session.registerHit(hand, t, h.label, repAt(r, t));
+  const played = h.source === 'midi' ? h.note : undefined;
+  const rec = session.registerHit(hand, t, h.label, repAt(r, t), played);
   // A repeated press without a release (shouldn't happen) closes the old one first.
   release(h.id, t);
   r.held.set(h.id, { rec, drawId: holdIds++ });
   if (rec.rep !== r.shown) return;
   if (rec.expected) {
-    rendered.markHit(hand, rec.expected.measure, rec.expected.index, rec.grade as Exclude<HitRecord['grade'], 'extra'>, rec.deltaMs!);
+    const wrong = rec.wrongNote ? spellMidi(rec.played!, keyById(exercise.key)) : undefined;
+    rendered.markHit(hand, rec.expected.measure, rec.expected.index, rec.grade as Exclude<HitRecord['grade'], 'extra'>, rec.deltaMs!, wrong);
   } else {
     rendered.markExtra(hand, qIn(r, t, rec.rep));
   }
@@ -589,6 +613,7 @@ function summaryCard(title: string, s: Summary): string {
         <span class="poor">${s.poor} poor</span>
         <span class="miss">${s.missed} missed</span>
         <span class="extra">${s.extra} extra</span>
+        ${isPitched(exercise) ? `<span class="miss">${s.wrongNotes} wrong note${s.wrongNotes === 1 ? '' : 's'}</span>` : ''}
       </div>
       <div class="counts arts">
         ${ARTICULATION_ORDER.map((k) => `<span class="art-${k}">${s.articulation.counts[k]} ${ARTICULATION_NAMES[k]}</span>`).join('')}
@@ -634,7 +659,7 @@ function showResults(session: Session, reps: number[]): void {
       : '';
     rows.push({
       t: h.time,
-      html: `${repCell(h.rep)}<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}</td><td>${held}</td><td>${art}</td>`,
+      html: `${repCell(h.rep)}<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}${wrongNote(h)}</td><td>${held}</td><td>${art}</td>`,
     });
   }
   for (const e of session.expected) {
@@ -649,6 +674,14 @@ function showResults(session: Session, reps: number[]): void {
   $('hit-head').innerHTML = `<tr>${(loop ? ['Rep', ...cols] : cols).map((c) => `<th>${c}</th>`).join('')}</tr>`;
   $('hit-rows').innerHTML = rows.map((r) => `<tr>${r.html}</tr>`).join('');
   $('results').hidden = false;
+}
+
+/** " · wrong note (E4)" for a hit on time but on the wrong key. */
+function wrongNote(h: HitRecord): string {
+  if (!h.wrongNote || !h.expected) return '';
+  const part = h.expected.hand === 'R' ? exercise.rh : exercise.lh!;
+  const want = part[h.expected.measure][h.expected.index].pitch;
+  return ` <span class="miss">· wrong note${want ? ` (wanted ${pitchName(want)})` : ''}</span>`;
 }
 
 /** One row per repetition, so progress across a loop is visible. */
@@ -856,6 +889,18 @@ onChange(subdivide, () => ((settings.subdivide = subdivide.checked), persist()))
 onChange(levelSel, () => ((settings.level = Number(levelSel.value)), persist()));
 onChange(barsSel, () => ((settings.bars = Number(barsSel.value)), persist()));
 onChange(lhPatternSel, () => ((settings.lhPattern = lhPatternSel.value as LhPattern), persist()));
+onChange(notesSel, () => {
+  settings.notes = notesSel.value as NotesMode;
+  persist();
+  generate();
+});
+onChange(keySel, () => {
+  settings.key = keySel.value;
+  persist();
+  // New notes for a generated exercise; a typed one just gets the new key signature.
+  if (settings.notes !== 'rhythm') generate();
+  else setExercise({ ...exercise, key: settings.key });
+});
 onChange(repeatsSel, () => {
   settings.repeats = Number(repeatsSel.value);
   persist();

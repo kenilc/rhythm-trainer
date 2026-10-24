@@ -429,6 +429,21 @@ b.extra, .extra { color: var(--extra); }
   font-weight: 600;
 }
 
+/* A note played instead of the written one. */
+.score .wrong-note ellipse {
+  fill: var(--miss);
+  stroke: none;
+}
+.score .wrong-note line {
+  stroke: var(--miss);
+  stroke-width: 1.2;
+}
+.score .wrong-note text {
+  fill: var(--miss);
+  font-size: 14px;
+  font-weight: 700;
+}
+
 /* Duration lane: written length behind, held length on top. */
 .score rect.written {
   fill: var(--written);
