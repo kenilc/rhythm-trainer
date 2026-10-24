@@ -44,6 +44,10 @@ interface Settings {
   level: number;
   bars: number;
   lhPattern: LhPattern;
+  /** 1 = play once, 0 = loop until stopped, otherwise that many times. */
+  repeats: number;
+  /** One bar of rest (with clicks) between repetitions. */
+  restBar: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -58,6 +62,8 @@ const DEFAULTS: Settings = {
   level: 1,
   bars: 4,
   lhPattern: 'steady',
+  repeats: 1,
+  restBar: false,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -96,6 +102,8 @@ const subdivide = $<HTMLInputElement>('subdivide');
 const levelSel = $<HTMLSelectElement>('level');
 const barsSel = $<HTMLSelectElement>('bars');
 const lhPatternSel = $<HTMLSelectElement>('lh-pattern');
+const repeatsSel = $<HTMLSelectElement>('repeats');
+const restBar = $<HTMLInputElement>('rest-bar');
 const rhText = $<HTMLTextAreaElement>('rh-text');
 const lhText = $<HTMLTextAreaElement>('lh-text');
 const parseError = $('parse-error');
@@ -129,6 +137,9 @@ function syncControls(): void {
   levelSel.value = String(settings.level);
   barsSel.value = String(settings.bars);
   lhPatternSel.value = settings.lhPattern;
+  repeatsSel.value = String(settings.repeats);
+  restBar.checked = settings.restBar;
+  $('rest-bar-field').hidden = settings.repeats === 1;
   document.querySelectorAll<HTMLButtonElement>('#hands button').forEach((b) => {
     b.classList.toggle('on', (b.dataset.hands === '2') === settings.twoHands);
   });
@@ -192,23 +203,45 @@ function applyCustom(): void {
 
 // ---------------------------------------------------------------------------
 // Running an exercise
+//
+// A run is one or more repetitions of the exercise. Only the first gets a
+// count-in; later ones follow seamlessly (or after a bar of rest). Every
+// repetition's notes go into one Session so hits near the seam match the
+// right note, and each repetition is summarised on its own.
 
 interface Run {
   mode: 'play' | 'listen';
   bus: GainNode;
   start: number;
+  /** Start of the first repetition. */
   exStart: number;
+  /** Length of the exercise itself, and of one repetition including rest. */
+  exSec: number;
+  repSec: number;
+  /** Number of repetitions; Infinity loops until stopped. */
+  repeats: number;
+  scheduled: number;
+  /** Repetitions that are over, in order. */
+  completed: number[];
+  /** Repetition whose marks are on the score. */
+  shown: number;
+  /** Finite runs end here; Infinity otherwise. */
   end: number;
   beatSec: number;
   quarterSec: number;
   session: Session | null;
   raf: number;
+  timer: number;
   /** Keys currently held down, by input id. */
   held: Map<string, { rec: HitRecord; drawId: number }>;
 }
 
 /** How long to wait after the last note for keys still held down. */
 const RELEASE_GRACE = 1.5;
+/** Schedule audio this far ahead (background tabs only wake timers ~1/s). */
+const SCHEDULE_AHEAD = 2.5;
+/** Switch the score to the next repetition this long before it starts, so early hits on its first note show. */
+const SHOW_AHEAD = 0.2;
 let holdIds = 0;
 
 let run: Run | null = null;
@@ -250,6 +283,8 @@ function scheduleClicks(bus: GainNode, from: number, bars: number, beatSec: numb
   }
 }
 
+const repStart = (r: Run, n: number) => r.exStart + n * r.repSec;
+
 function startRun(mode: 'play' | 'listen'): void {
   stopAll();
   const c = audioCtx();
@@ -257,83 +292,146 @@ function startRun(mode: 'play' | 'listen'): void {
   const beatSec = 60 / settings.bpm;
   const quarterSec = beatSec / beatQuarters(meter);
   const barSec = measureQuarters(meter) * quarterSec;
-  const bars = exercise.rh.length;
+  const exSec = totalQuarters(exercise) * quarterSec;
+  const loop = mode === 'play' && settings.repeats !== 1;
+  const restBars = loop && settings.restBar ? 1 : 0;
   const start = c.currentTime + 0.2;
   const exStart = start + settings.countIn * barSec;
+  const repeats = mode === 'listen' ? 1 : settings.repeats === 0 ? Infinity : settings.repeats;
   const bus = makeBus();
-
   scheduleClicks(bus, start, settings.countIn, beatSec, meter);
-  if (settings.clickDuring || mode === 'listen') scheduleClicks(bus, exStart, bars, beatSec, meter);
-
-  const onsets = exerciseOnsets(exercise);
-  let session: Session | null = null;
-  if (mode === 'listen') {
-    for (const o of onsets) {
-      tone(bus, exStart + o.q * quarterSec, o.hand, o.durQ * quarterSec);
-    }
-  } else {
-    session = new Session(onsets, (q) => exStart + q * quarterSec, STRICTNESS[settings.strictness]);
-  }
 
   rendered.clearMarks();
   $('results').hidden = true;
-  const last = session ? Math.max(...session.expected.map((e) => e.time + e.window)) : 0;
   run = {
     mode,
     bus,
     start,
     exStart,
-    end: Math.max(exStart + totalQuarters(exercise) * quarterSec, last) + 0.15,
+    exSec,
+    repSec: exSec + restBars * barSec,
+    repeats,
+    scheduled: 0,
+    completed: [],
+    shown: 0,
+    end: Infinity,
     beatSec,
     quarterSec,
-    session,
+    session: mode === 'play' ? new Session([], (q) => q, STRICTNESS[settings.strictness]) : null,
     raf: 0,
+    timer: 0,
     held: new Map(),
   };
+  scheduleAhead();
+  renderRepStrip();
   setRunning(true);
+  run.timer = window.setInterval(scheduleAhead, 200);
   run.raf = requestAnimationFrame(frame);
+}
+
+/** Schedule clicks, tones and expected notes for repetitions starting soon. */
+function scheduleAhead(): void {
+  if (!run) return;
+  const r = run;
+  const now = audioCtx().currentTime;
+  const meter = exercise.meter;
+  const onsets = exerciseOnsets(exercise);
+  const bars = exercise.rh.length;
+  const restBars = Math.round((r.repSec - r.exSec) / (r.beatSec * meter.num));
+  while (r.scheduled < r.repeats && repStart(r, r.scheduled) < now + SCHEDULE_AHEAD) {
+    const n = r.scheduled++;
+    const t0 = repStart(r, n);
+    if (settings.clickDuring || r.mode === 'listen') scheduleClicks(r.bus, t0, bars, r.beatSec, meter);
+    // The rest bar always clicks: it works as a count-in for the next repetition.
+    if (restBars && n + 1 < r.repeats) scheduleClicks(r.bus, t0 + r.exSec, restBars, r.beatSec, meter);
+    if (r.session) {
+      r.session.addOnsets(onsets, (q) => t0 + q * r.quarterSec, n);
+    } else {
+      for (const o of onsets) tone(r.bus, t0 + o.q * r.quarterSec, o.hand, o.durQ * r.quarterSec);
+    }
+  }
+  // Once the last repetition is scheduled, the end is known: after its
+  // last note's matching window (or the end of the bar, if later).
+  if (r.scheduled === r.repeats && !Number.isFinite(r.end)) {
+    const lastNote = Math.max(0, ...(r.session?.expected.map((e) => e.time + e.window) ?? []));
+    r.end = Math.max(lastNote, repStart(r, r.repeats - 1) + r.exSec) + 0.15;
+  }
 }
 
 /** Current audible time, in the same frame as compensated hits. */
 const nowAudible = () => perfToAudio(performance.now());
 
+/** Repetition a moment belongs to (clamped to the scheduled ones). */
+function repAt(r: Run, t: number): number {
+  const n = Math.floor((t - r.exStart) / r.repSec);
+  return Math.min(Math.max(0, n), Math.max(0, r.scheduled - 1));
+}
+
+/** Quarter position of a time within a given repetition. */
+const qIn = (r: Run, t: number, rep: number) => (t - repStart(r, rep)) / r.quarterSec;
+
 function frame(): void {
   if (!run) return;
+  const r = run;
   const now = nowAudible();
   const meter = exercise.meter;
-  const q = (now - run.exStart) / run.quarterSec;
-  if (now < run.start) {
+  const repLabel = r.repeats === 1 ? '' : ` · rep ${repAt(r, now) + 1}${Number.isFinite(r.repeats) ? ` / ${r.repeats}` : ''}`;
+  if (now < r.start) {
     showBeat('…', 'get ready');
-  } else if (now < run.exStart) {
-    const beat = Math.floor((now - run.start) / run.beatSec);
+  } else if (now < r.exStart) {
+    const beat = Math.floor((now - r.start) / r.beatSec);
     showBeat(String((beat % meter.num) + 1), 'count-in');
     rendered.setCursor(null);
-  } else if (q < totalQuarters(exercise)) {
-    const mq = measureQuarters(meter);
-    const bar = Math.floor(q / mq);
-    const beat = Math.floor((q - bar * mq) / beatQuarters(meter));
-    showBeat(String(beat + 1), `bar ${bar + 1} / ${exercise.rh.length}`);
-    rendered.setCursor(q);
+  } else if (now < r.end) {
+    const n = repAt(r, now);
+    const inRep = now - repStart(r, n);
+    if (inRep < r.exSec) {
+      const q = inRep / r.quarterSec;
+      const mq = measureQuarters(meter);
+      const bar = Math.floor(q / mq);
+      const beat = Math.floor((q - bar * mq) / beatQuarters(meter));
+      showBeat(String(beat + 1), `bar ${bar + 1} / ${exercise.rh.length}${repLabel}`);
+      rendered.setCursor(q);
+    } else {
+      const beat = Math.floor((inRep - r.exSec) / r.beatSec);
+      showBeat(String((beat % meter.num) + 1), `rest · rep ${n + 2} next`);
+      rendered.setCursor(null);
+    }
   }
 
-  if (run.session) {
-    for (const e of run.session.sweepMisses(now - lat())) rendered.markMiss(e.hand, e.measure, e.index);
+  // Move the score's marks to the next repetition just before it starts.
+  const show = Math.min(repAt(r, now + SHOW_AHEAD), r.repeats - 1);
+  if (show !== r.shown) {
+    r.shown = show;
+    rendered.clearMarks();
+  }
+
+  if (r.session) {
+    for (const e of r.session.sweepMisses(now - lat())) {
+      if (e.rep === r.shown) rendered.markMiss(e.hand, e.measure, e.index);
+    }
     // Grow the bars of keys still held down.
-    const qNow = (now - lat() - run.exStart) / run.quarterSec;
-    for (const { rec, drawId } of run.held.values()) {
-      rendered.drawHold(drawId, rec.hand, qOf(rec.time), qNow, 'holding');
+    for (const { rec, drawId } of r.held.values()) {
+      if (rec.rep === r.shown) rendered.drawHold(drawId, rec.hand, qIn(r, rec.time, rec.rep), qIn(r, now - lat(), rec.rep), 'holding');
+    }
+    // A repetition is over once its last note's window has passed.
+    const session = r.session;
+    while (r.completed.length < r.scheduled) {
+      const n = r.completed.length;
+      const last = session.expected.filter((e) => e.rep === n).reduce((m, e) => Math.max(m, e.time + e.window), 0);
+      if (now - lat() < Math.max(last, repStart(r, n) + r.exSec)) break;
+      r.completed.push(n);
+      renderRepStrip();
     }
   }
 
   // Wait a little past the end for the last notes to be released.
-  if (now > run.end && (run.held.size === 0 || now > run.end + RELEASE_GRACE)) {
+  if (now > r.end && (r.held.size === 0 || now > r.end + RELEASE_GRACE)) {
     finishRun();
     return;
   }
-  run.raf = requestAnimationFrame(frame);
+  r.raf = requestAnimationFrame(frame);
 }
-
-const qOf = (t: number) => (run ? (t - run.exStart) / run.quarterSec : 0);
 
 function finishRun(): void {
   if (!run) return;
@@ -341,19 +439,30 @@ function finishRun(): void {
   // Keys still down at the very end: count them as released now.
   for (const id of [...r.held.keys()]) release(id, nowAudible() - lat());
   stopAll();
-  if (r.session) {
-    for (const e of r.session.sweepMisses(Infinity)) rendered.markMiss(e.hand, e.measure, e.index);
-    showResults(r.session);
-    const s = r.session.summary();
-    showBeat(`${Math.round(s.score * 100)}%`, 'done — press Play to try again');
-  } else {
+  if (!r.session) {
     showBeat('Ready', '');
+    return;
   }
+  // A single run always counts; in a loop, only repetitions that were finished.
+  const reps = r.repeats === 1 ? [0] : r.completed;
+  if (r.repeats === 1) r.session.sweepMisses(Infinity);
+  if (!reps.length) {
+    showBeat('Stopped', 'no complete repetition');
+    return;
+  }
+  for (const e of r.session.expected) {
+    if (e.rep === r.shown && reps.includes(e.rep) && !e.hit && e.missed) rendered.markMiss(e.hand, e.measure, e.index);
+  }
+  showResults(r.session, reps);
+  const s = r.session.summary(undefined, reps);
+  const label = reps.length > 1 ? `average of ${reps.length} repetitions` : 'done';
+  showBeat(`${Math.round(s.score * 100)}%`, `${label} — press Play to try again`);
 }
 
 function stopAll(): void {
   if (run) {
     cancelAnimationFrame(run.raf);
+    clearInterval(run.timer);
     run.bus.disconnect();
     run = null;
     rendered?.setCursor(null);
@@ -364,6 +473,12 @@ function stopAll(): void {
     showBeat('Ready', '');
   }
   setRunning(false);
+}
+
+/** Stop button: in a loop, keep the finished repetitions and show their results. */
+function stopPressed(): void {
+  if (run?.session && run.repeats !== 1) finishRun();
+  else stopAll();
 }
 
 const lat = () => (latencyMs ?? 0) / 1000;
@@ -379,8 +494,9 @@ function release(id: string, t: number): void {
   if (!run?.session || !h) return;
   run.held.delete(id);
   run.session.registerRelease(h.rec, t);
+  if (h.rec.rep !== run.shown) return;
   const kind = h.rec.articulation ?? (h.rec.expected ? 'holding' : 'extra');
-  rendered.drawHold(h.drawId, h.rec.hand, qOf(h.rec.time), qOf(h.rec.release!), kind);
+  rendered.drawHold(h.drawId, h.rec.hand, qIn(run, h.rec.time, h.rec.rep), qIn(run, h.rec.release!, h.rec.rep), kind);
 }
 
 function onHit(h: RawHit): void {
@@ -393,20 +509,41 @@ function onHit(h: RawHit): void {
     calib.hits.push(perfToAudio(h.perf));
     return;
   }
-  if (!run || run.mode !== 'play' || !run.session) return;
+  if (!run?.session || run.mode !== 'play') return;
+  const r = run;
+  const session = run.session;
   const t = perfToAudio(h.perf) - lat();
   // Ignore stray notes during the count-in.
-  if (t < run.exStart - 0.25 || t > run.end) return;
+  if (t < r.exStart - 0.25 || t > r.end) return;
   const hand = handFor(h);
-  const rec = run.session.registerHit(hand, t, h.label);
+  const rec = session.registerHit(hand, t, h.label, repAt(r, t));
   // A repeated press without a release (shouldn't happen) closes the old one first.
   release(h.id, t);
-  run.held.set(h.id, { rec, drawId: holdIds++ });
+  r.held.set(h.id, { rec, drawId: holdIds++ });
+  if (rec.rep !== r.shown) return;
   if (rec.expected) {
     rendered.markHit(hand, rec.expected.measure, rec.expected.index, rec.grade as Exclude<HitRecord['grade'], 'extra'>, rec.deltaMs!);
   } else {
-    rendered.markExtra(hand, (t - run.exStart) / run.quarterSec);
+    rendered.markExtra(hand, qIn(r, t, rec.rep));
   }
+}
+
+/** Live strip of per-repetition scores during a loop. */
+function renderRepStrip(): void {
+  const strip = $('rep-strip');
+  if (!run?.session || run.repeats === 1) {
+    strip.hidden = true;
+    return;
+  }
+  const s = run.session;
+  const scores = run.completed.map((n) => Math.round(s.summary(undefined, n).score * 100));
+  const best = Math.max(...scores);
+  strip.hidden = false;
+  strip.innerHTML =
+    '<span class="hint">Repetitions:</span>' +
+    (scores.length
+      ? scores.map((v, i) => `<span class="rep-chip${v === best ? ' best' : ''}">#${i + 1} ${v}%</span>`).join('')
+      : '<span class="hint">scores appear after each one</span>');
 }
 
 // ---------------------------------------------------------------------------
@@ -468,21 +605,26 @@ function positionLabel(e: Expected): string {
   return `bar ${e.measure + 1}, ${beat + 1}${syll}`;
 }
 
-function showResults(session: Session): void {
+function showResults(session: Session, reps: number[]): void {
+  const loop = reps.length > 1 || reps[0] !== 0;
   const parts: string[] = [];
+  const title = loop ? `${reps.length} repetitions` : 'Result';
   if (exercise.lh) {
-    parts.push(summaryCard('Both hands', session.summary()));
-    parts.push(summaryCard('Right hand', session.summary('R')));
-    parts.push(summaryCard('Left hand', session.summary('L')));
+    parts.push(summaryCard(loop ? `Both hands · ${title}` : 'Both hands', session.summary(undefined, reps)));
+    parts.push(summaryCard('Right hand', session.summary('R', reps)));
+    parts.push(summaryCard('Left hand', session.summary('L', reps)));
   } else {
-    parts.push(summaryCard('Result', session.summary()));
+    parts.push(summaryCard(title, session.summary(undefined, reps)));
   }
   $('summary').innerHTML = parts.join('');
+  renderRepHistory(session, reps);
 
   type Row = { t: number; html: string };
   const rows: Row[] = [];
   const handName = (h: Hand) => (h === 'R' ? 'Right' : 'Left');
+  const repCell = (n: number) => (loop ? `<td>${n + 1}</td>` : '');
   for (const h of session.hits) {
+    if (!reps.includes(h.rep)) continue;
     const ms = h.deltaMs === undefined ? '' : `${h.deltaMs > 0 ? '+' : ''}${Math.round(h.deltaMs)} ms`;
     const pos = h.expected ? positionLabel(h.expected) : 'between notes';
     const held = h.release === undefined ? '' : `${Math.round((h.release - h.time) * 1000)} ms`;
@@ -491,15 +633,60 @@ function showResults(session: Session): void {
       : '';
     rows.push({
       t: h.time,
-      html: `<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}</td><td>${held}</td><td>${art}</td>`,
+      html: `${repCell(h.rep)}<td>${handName(h.hand)}</td><td>${pos}</td><td>${h.label}</td><td>${ms}</td><td class="${h.grade}">${h.grade}</td><td>${held}</td><td>${art}</td>`,
     });
   }
   for (const e of session.expected) {
-    if (!e.hit) rows.push({ t: e.time, html: `<td>${handName(e.hand)}</td><td>${positionLabel(e)}</td><td>—</td><td></td><td class="miss">missed</td><td></td><td></td>` });
+    if (e.hit || !reps.includes(e.rep)) continue;
+    rows.push({
+      t: e.time,
+      html: `${repCell(e.rep)}<td>${handName(e.hand)}</td><td>${positionLabel(e)}</td><td>—</td><td></td><td class="miss">missed</td><td></td><td></td>`,
+    });
   }
   rows.sort((a, b) => a.t - b.t);
+  const cols = ['Hand', 'Position', 'Key', 'Offset', 'Grade', 'Held', 'Articulation'];
+  $('hit-head').innerHTML = `<tr>${(loop ? ['Rep', ...cols] : cols).map((c) => `<th>${c}</th>`).join('')}</tr>`;
   $('hit-rows').innerHTML = rows.map((r) => `<tr>${r.html}</tr>`).join('');
   $('results').hidden = false;
+}
+
+/** One row per repetition, so progress across a loop is visible. */
+function renderRepHistory(session: Session, reps: number[]): void {
+  const el = $('rep-history');
+  if (reps.length < 2) {
+    el.hidden = true;
+    return;
+  }
+  const sums = reps.map((n) => session.summary(undefined, n));
+  const scores = sums.map((s) => Math.round(s.score * 100));
+  const best = Math.max(...scores);
+  const half = Math.floor(reps.length / 2);
+  const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const trend = avg(scores.slice(reps.length - half)) - avg(scores.slice(0, half));
+  const trendText =
+    Math.abs(trend) < 3
+      ? 'Steady across repetitions.'
+      : trend > 0
+        ? `Improving: second half averaged ${Math.round(trend)} points higher.`
+        : `Fading: second half averaged ${Math.round(-trend)} points lower. Maybe time for a break.`;
+  el.hidden = false;
+  el.innerHTML = `
+    <h3>Repetitions</h3>
+    <p class="hint">${trendText}</p>
+    <table class="hits reps">
+      <thead><tr><th>Rep</th><th>Score</th><th>Timing</th><th>Consistency</th><th>Articulation</th><th>Missed</th><th>Extra</th></tr></thead>
+      <tbody>
+        ${sums
+          .map(
+            (s, i) => `<tr${scores[i] === best ? ' class="best"' : ''}>
+              <td>${reps[i] + 1}</td>
+              <td><span class="score-bar" style="--w:${scores[i]}"></span>${scores[i]}%</td>
+              <td>${tendency(s)}</td><td>${consistency(s.sdMs)}</td><td>${articulationLine(s)}</td>
+              <td>${s.missed}</td><td>${s.extra}</td></tr>`,
+          )
+          .join('')}
+      </tbody>
+    </table>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,12 +855,18 @@ onChange(subdivide, () => ((settings.subdivide = subdivide.checked), persist()))
 onChange(levelSel, () => ((settings.level = Number(levelSel.value)), persist()));
 onChange(barsSel, () => ((settings.bars = Number(barsSel.value)), persist()));
 onChange(lhPatternSel, () => ((settings.lhPattern = lhPatternSel.value as LhPattern), persist()));
+onChange(repeatsSel, () => {
+  settings.repeats = Number(repeatsSel.value);
+  persist();
+  syncControls();
+});
+onChange(restBar, () => ((settings.restBar = restBar.checked), persist()));
 
 $('generate').addEventListener('click', generate);
 $('apply').addEventListener('click', applyCustom);
 startBtn.addEventListener('click', () => startRun('play'));
 listenBtn.addEventListener('click', () => startRun('listen'));
-stopBtn.addEventListener('click', stopAll);
+stopBtn.addEventListener('click', stopPressed);
 metroBtn.addEventListener('click', () => {
   if (metronome.running) {
     stopAll();

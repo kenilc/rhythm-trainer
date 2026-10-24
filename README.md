@@ -19,6 +19,9 @@ Open http://localhost:5173 in **Chrome or Edge**. Safari has no Web MIDI.
    (audio output plus MIDI input) is subtracted from every hit.
 3. Pick a tempo, time signature and hands, then **Generate** a rhythm or write your own.
 4. **Listen** plays the rhythm once. **Play** gives a count-in, then you play along.
+5. **Repeat** loops the exercise 3, 5 or 10 times, or until you press Stop. Only the first repetition
+   gets a count-in; turn on *Bar of rest between repeats* for a breather (it clicks, so it doubles as a
+   count-in). Each repetition is scored on its own, and the results show a per-repetition table with the trend.
 
 Two hands: notes below the split point (default C4) count as left hand.
 Keyboard fallback: `A S D F` = left hand, `J K L ;` / Space = right hand.

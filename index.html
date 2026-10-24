@@ -51,6 +51,19 @@
           </select>
         </div>
         <div class="field">
+          <label for="repeats">Repeat</label>
+          <select id="repeats">
+            <option value="1">Once</option>
+            <option value="3">3 times</option>
+            <option value="5">5 times</option>
+            <option value="10">10 times</option>
+            <option value="0">Until stopped</option>
+          </select>
+        </div>
+        <div class="field checks" id="rest-bar-field">
+          <label><input type="checkbox" id="rest-bar" /> Bar of rest between repeats</label>
+        </div>
+        <div class="field">
           <label for="strictness">Strictness</label>
           <select id="strictness">
             <option value="strict">Strict (±15 / 35 / 70 ms)</option>
@@ -119,6 +132,7 @@
             <span id="beat-sub"></span>
           </div>
         </div>
+        <div id="rep-strip" class="rep-strip" hidden></div>
         <div id="score" class="score"></div>
         <div class="legend">
           <span><i class="sw perfect"></i>perfect</span>
@@ -143,12 +157,11 @@
       <section class="panel results" id="results" hidden aria-label="Results">
         <h2>Results</h2>
         <div id="summary" class="summary"></div>
+        <div id="rep-history" class="rep-history" hidden></div>
         <details>
           <summary>Every hit</summary>
           <table class="hits">
-            <thead>
-              <tr><th>Hand</th><th>Position</th><th>Key</th><th>Offset</th><th>Grade</th><th>Held</th><th>Articulation</th></tr>
-            </thead>
+            <thead id="hit-head"></thead>
             <tbody id="hit-rows"></tbody>
           </table>
         </details>

@@ -41,6 +41,8 @@ export interface Expected extends Onset {
   time: number;
   /** Written length in seconds. */
   durSec: number;
+  /** Repetition index in loop mode (0 for a single run). */
+  rep: number;
   /** Half-width of the matching window in seconds. */
   window: number;
   hit?: HitRecord;
@@ -56,6 +58,8 @@ export interface HitRecord {
   deltaMs?: number;
   grade: Grade | 'extra';
   expected?: Expected;
+  /** Repetition this hit counts towards. */
+  rep: number;
   /** Release time (audio clock, latency-compensated); undefined while held. */
   release?: number;
   /** Held time ÷ written length, for matched hits. */
@@ -72,8 +76,13 @@ export function gradeFor(absMs: number, t: Thresholds): Grade {
 
 const GRADE_POINTS: Record<Grade, number> = { perfect: 1, good: 0.8, ok: 0.5, poor: 0.2 };
 
+/** Which hits and notes a summary covers: one repetition, several, or all. */
+export type RepFilter = number | number[] | undefined;
+
+const inReps = (rep: number, f: RepFilter) => f === undefined || (Array.isArray(f) ? f.includes(rep) : f === rep);
+
 export class Session {
-  readonly expected: Expected[];
+  readonly expected: Expected[] = [];
   readonly hits: HitRecord[] = [];
 
   constructor(
@@ -82,20 +91,33 @@ export class Session {
     toTime: (q: number) => number,
     readonly thresholds: Thresholds,
   ) {
-    this.expected = onsets.map((o) => ({ ...o, time: toTime(o.q), durSec: toTime(o.q + o.durQ) - toTime(o.q), window: 0 }));
+    this.addOnsets(onsets, toTime, 0);
+  }
+
+  /** Add another repetition's notes (loop mode). */
+  addOnsets(onsets: Onset[], toTime: (q: number) => number, rep: number): void {
+    for (const o of onsets) {
+      this.expected.push({ ...o, rep, time: toTime(o.q), durSec: toTime(o.q + o.durQ) - toTime(o.q), window: 0 });
+    }
+    this.expected.sort((a, b) => a.time - b.time);
     // Window: generous, but never more than ~half the gap to a neighbouring
-    // onset in the same hand, so each hit can only belong to one note.
+    // onset in the same hand, so each hit can only belong to one note. This
+    // also holds across the seam between repetitions.
+    const maxWin = (this.thresholds.ok * 1.5) / 1000;
     for (const hand of ['R', 'L'] as Hand[]) {
       const list = this.expected.filter((e) => e.hand === hand);
       list.forEach((e, i) => {
         const gaps = [list[i - 1], list[i + 1]].filter(Boolean).map((n) => Math.abs(n!.time - e.time));
-        const maxWin = (thresholds.ok * 1.5) / 1000;
         e.window = gaps.length ? Math.min(maxWin, 0.49 * Math.min(...gaps)) : maxWin;
       });
     }
   }
 
-  registerHit(hand: Hand, time: number, label: string): HitRecord {
+  /**
+   * Match a hit to the nearest open note of that hand. `extraRep` is the
+   * repetition an unmatched hit is charged to.
+   */
+  registerHit(hand: Hand, time: number, label: string, extraRep = 0): HitRecord {
     let best: Expected | undefined;
     for (const e of this.expected) {
       if (e.hand !== hand || e.hit || e.missed) continue;
@@ -105,10 +127,10 @@ export class Session {
     let rec: HitRecord;
     if (best) {
       const deltaMs = (time - best.time) * 1000;
-      rec = { hand, time, label, deltaMs, grade: gradeFor(Math.abs(deltaMs), this.thresholds), expected: best };
+      rec = { hand, time, label, deltaMs, grade: gradeFor(Math.abs(deltaMs), this.thresholds), expected: best, rep: best.rep };
       best.hit = rec;
     } else {
-      rec = { hand, time, label, grade: 'extra' };
+      rec = { hand, time, label, grade: 'extra', rep: extraRep };
     }
     this.hits.push(rec);
     return rec;
@@ -142,9 +164,9 @@ export class Session {
     return { counts, meanRatio, measured: released.length };
   }
 
-  summary(hand?: Hand): Summary {
-    const exp = this.expected.filter((e) => !hand || e.hand === hand);
-    const hits = this.hits.filter((h) => !hand || h.hand === hand);
+  summary(hand?: Hand, reps?: RepFilter): Summary {
+    const exp = this.expected.filter((e) => (!hand || e.hand === hand) && inReps(e.rep, reps));
+    const hits = this.hits.filter((h) => (!hand || h.hand === hand) && inReps(h.rep, reps));
     const matched = hits.filter((h) => h.grade !== 'extra');
     const deltas = matched.map((h) => h.deltaMs!);
     const mean = deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 0;

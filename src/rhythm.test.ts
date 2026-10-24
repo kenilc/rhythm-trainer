@@ -120,3 +120,33 @@ describe('articulation', () => {
     expect(s.summary().articulation.counts).toMatchObject({ staccato: 1, legato: 1 });
   });
 });
+
+describe('Session repetitions (loop mode)', () => {
+  // One bar of quarters at 120 BPM: 2 s per repetition, seamless.
+  const rh = splitMeasures(parseRhythm('q q q q'), m44);
+  const onsets = exerciseOnsets({ meter: m44, rh, lh: null });
+  const loop = () => {
+    const s = new Session([], (q) => q, STRICTNESS.normal);
+    for (let n = 0; n < 2; n++) s.addOnsets(onsets, (q) => n * 2 + q * 0.5, n);
+    return s;
+  };
+
+  it('matches an early hit at the seam to the next repetition', () => {
+    const s = loop();
+    const rec = s.registerHit('R', 2 - 0.04, 'C4');
+    expect(rec.rep).toBe(1);
+    expect(rec.expected?.q).toBe(0);
+    expect(rec.deltaMs).toBeCloseTo(-40);
+  });
+
+  it('summarises each repetition separately and together', () => {
+    const s = loop();
+    [0, 0.5, 1, 1.5].forEach((t) => s.registerHit('R', t, 'C4')); // rep 1 perfect
+    s.registerHit('R', 2.09, 'C4'); // rep 2: one ok note, three missed
+    s.registerHit('R', 3.25, 'C4', 1); // and an extra
+    s.sweepMisses(Infinity);
+    expect(s.summary(undefined, 0)).toMatchObject({ total: 4, perfect: 4, missed: 0 });
+    expect(s.summary(undefined, 1)).toMatchObject({ total: 4, ok: 1, missed: 3, extra: 1 });
+    expect(s.summary(undefined, [0, 1]).total).toBe(8);
+  });
+});

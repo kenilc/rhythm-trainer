@@ -465,6 +465,53 @@ b.extra, .extra { color: var(--extra); }
   margin-top: 4px;
 }
 
+.rep-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.rep-chip {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.rep-chip.best {
+  border-color: var(--perfect);
+  color: var(--perfect);
+}
+.rep-history {
+  margin-top: 16px;
+}
+.rep-history h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.rep-history p {
+  margin: 4px 0 0;
+}
+table.reps td:nth-child(-n + 2) {
+  white-space: nowrap;
+}
+table.reps tr.best td:first-child::after {
+  content: ' ★';
+  color: var(--perfect);
+}
+.score-bar {
+  display: inline-block;
+  width: calc(var(--w) * 0.6px);
+  height: 6px;
+  border-radius: 3px;
+  background: var(--accent);
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
 table.hits {
   width: 100%;
   border-collapse: collapse;
