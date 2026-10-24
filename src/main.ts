@@ -166,6 +166,7 @@ function setExercise(ex: Exercise): void {
   lhText.value = ex.lh ? measuresToText(ex.lh) : '';
   parseError.textContent = '';
   rendered = renderScore(scoreEl, ex);
+  laidOutWidth = scoreEl.clientWidth;
   $('results').hidden = true;
   showBeat('Ready', '');
 }
@@ -910,17 +911,14 @@ $('cal-reset').addEventListener('click', () => {
   $('cal-result').textContent = 'Offset reset to 0 ms.';
 });
 
-// Re-layout the notation when the window width changes.
-let resizeTimer = 0;
-let lastWidth = scoreEl.clientWidth;
-window.addEventListener('resize', () => {
-  clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(() => {
-    if (run || Math.abs(scoreEl.clientWidth - lastWidth) < 20) return;
-    lastWidth = scoreEl.clientWidth;
-    rendered = renderScore(scoreEl, exercise);
-  }, 200);
-});
+// Re-layout the notation when its width changes a lot (small changes just scale).
+let laidOutWidth = 0;
+new ResizeObserver(() => {
+  const w = scoreEl.clientWidth;
+  if (run || !exercise || Math.abs(w - laidOutWidth) < 40) return;
+  rendered = renderScore(scoreEl, exercise);
+  laidOutWidth = w;
+}).observe(scoreEl);
 
 syncControls();
 generate();

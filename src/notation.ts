@@ -13,6 +13,15 @@ interface Anchor {
   line: number;
 }
 
+/** Where a measure sits: time maps linearly onto x between x0 and x1. */
+interface MeasureSpan {
+  line: number;
+  x0: number;
+  x1: number;
+  /** x of the bar line closing this measure. */
+  barX: number;
+}
+
 export interface RenderedScore {
   /** Draw a graded hit under the note at (hand, measure, index). */
   markHit(hand: Hand, measure: number, index: number, grade: Grade, deltaMs: number): void;
@@ -36,50 +45,57 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
   const twoHands = !!ex.lh;
   const timeSig = `${ex.meter.num}/${ex.meter.den}`;
 
-  // Measure widths grow with note density, then lines are packed greedily.
+  // Notes are spaced in proportion to time, and every bar gets the same
+  // note area, so one beat is the same width everywhere and the cursor
+  // moves at one constant speed. The area must fit the busiest bar.
   const nMeasures = ex.rh.length;
   const density = (i: number) => Math.max(ex.rh[i].length, ex.lh?.[i].length ?? 0);
-  const baseWidth = (i: number) => 60 + density(i) * 34;
-  const lineStartExtra = 70;
+  const shortest = (i: number) => Math.min(...[...ex.rh[i], ...(ex.lh?.[i] ?? [])].map((n) => n.dur));
+  const needArea = (i: number) => Math.max(20 + density(i) * 34, (mq / shortest(i)) * 30);
+  // Where notes start in a plain stave, and how much a clef (+ time signature) adds.
+  const plainNoteStart = new Stave(0, 0, 200).getNoteStartX();
+  const clefOnlyExtra = new Stave(0, 0, 200).addClef('treble').getNoteStartX() - plainNoteStart;
+  const clefExtra = new Stave(0, 0, 200).addClef('treble').addTimeSignature(timeSig).getNoteStartX() - plainNoteStart;
+  // Room after the last note of a line so it doesn't sit on the bar line.
+  const tail = plainNoteStart + 24;
   const left = 10;
   const usable = width - left * 2;
+  const room = usable - clefExtra - tail;
+  const need = Math.max(...Array.from({ length: nMeasures }, (_, i) => needArea(i)));
+  const perLine = Math.max(1, Math.min(nMeasures, Math.floor(room / need)));
+  const area = Math.max(need, room / perLine);
   const lines: number[][] = [];
-  let cur: number[] = [];
-  let curW = lineStartExtra;
-  for (let i = 0; i < nMeasures; i++) {
-    const w = baseWidth(i);
-    if (cur.length && curW + w > usable) {
-      lines.push(cur);
-      cur = [];
-      curW = lineStartExtra;
-    }
-    cur.push(i);
-    curW += w;
-  }
-  if (cur.length) lines.push(cur);
+  for (let i = 0; i < nMeasures; i += perLine) lines.push(Array.from({ length: Math.min(perLine, nMeasures - i) }, (_, k) => i + k));
 
   // Below each staff: marker row (dot + ms), then the duration lane.
   const staffGap = 125;
   const laneOffset = 26;
   const systemHeight = twoHands ? 285 : 160;
   const renderer = new Renderer(container as HTMLDivElement, Renderer.Backends.SVG);
-  renderer.resize(width, lines.length * systemHeight + 10);
+  const height = lines.length * systemHeight + 10;
+  renderer.resize(width, height);
   const ctx = renderer.getContext();
   const svg = container.querySelector('svg') as SVGSVGElement;
+  // Scale with the container, so small width changes (e.g. a scrollbar
+  // appearing) never cause overflow; larger ones trigger a re-layout.
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.removeAttribute('width');
+  svg.removeAttribute('height');
+  svg.style.width = '100%';
+  svg.style.height = 'auto';
 
   const noteAnchors = new Map<string, { x: number; y: number }>();
-  const anchors: Record<Hand, Anchor[]> = { R: [], L: [] };
+  const spans: MeasureSpan[] = [];
   const markerY: Record<Hand, number[]> = { R: [], L: [] };
   const lineBounds: { top: number; bottom: number; startQ: number; endQ: number }[] = [];
 
   lines.forEach((measures, li) => {
     const y = li * systemHeight;
-    const natural = measures.reduce((s, i) => s + baseWidth(i), lineStartExtra);
-    // Stretch each line to the full width, except a short last line.
-    const stretch = li === lines.length - 1 && natural < usable * 0.7 ? 1 : usable / natural;
     let x = left;
     measures.forEach((mi, k) => {
-      const w = (baseWidth(mi) + (k === 0 ? lineStartExtra : 0)) * stretch;
+      // First line also carries the time signature.
+      const lead = k > 0 ? 0 : li === 0 ? clefExtra : clefOnlyExtra;
+      const w = area + lead + (k === measures.length - 1 ? tail : 0);
       const rhStave = new Stave(x, y, w);
       const lhStave = twoHands ? new Stave(x, y + staffGap, w) : null;
       if (k === 0) {
@@ -116,6 +132,8 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
             clef: p.hand === 'R' ? 'treble' : 'bass',
           });
           if (n.dotted) Dot.buildAndAttach([sn], { all: true });
+          // Attach now so positions can be read before drawing.
+          sn.setStave(p.stave);
           return sn;
         });
         const voice = new Voice({ num_beats: ex.meter.num, beat_value: ex.meter.den });
@@ -133,6 +151,22 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
         Math.max(40, x + w - startX - 18),
       );
 
+      // Re-space notes in proportion to time so the cursor moves at a
+      // constant speed. The bar's time span runs up to where the next bar's
+      // first note sits, so the cursor crosses the bar line without a jump.
+      const first = built[0].vfNotes[0];
+      const origin = first.getAbsoluteX() - first.getTickContext().getX();
+      const end = origin + area;
+      built.forEach((b) => {
+        let q = 0;
+        b.notes.forEach((n, ni) => {
+          b.vfNotes[ni].getTickContext().setX((q / mq) * (end - origin));
+          q += n.dur;
+        });
+      });
+      const headMid = (first.getNoteHeadBeginX() + first.getNoteHeadEndX()) / 2 - first.getAbsoluteX();
+      spans[mi] = { line: li, x0: origin + headMid, x1: end + headMid, barX: x + w };
+
       built.forEach((b) => {
         b.voice.draw(ctx, b.stave);
         b.beams.forEach((beam) => beam.setContext(ctx).draw());
@@ -145,15 +179,11 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
         });
         const my = b.stave.getBottomLineY() + (b.hand === 'R' ? 22 : 26);
         markerY[b.hand][li] = my;
-        let q = mi * mq;
-        b.notes.forEach((n, ni) => {
+        b.notes.forEach((_, ni) => {
           const sn = b.vfNotes[ni];
           const nx = (sn.getNoteHeadBeginX() + sn.getNoteHeadEndX()) / 2;
           noteAnchors.set(`${b.hand}:${mi}:${ni}`, { x: nx, y: my });
-          anchors[b.hand].push({ q, x: nx, line: li });
-          q += n.dur;
         });
-        anchors[b.hand].push({ q: (mi + 1) * mq - 1e-6, x: x + w - 6, line: li });
       });
       x += w;
     });
@@ -199,19 +229,13 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
     marks.appendChild(c);
   };
 
-  const xAt = (hand: Hand, q: number): Anchor | null => {
-    const list = anchors[hand];
-    if (!list.length) return null;
-    let prev = list[0];
-    for (const a of list) {
-      if (a.q > q) {
-        if (a.line !== prev.line || a.q === prev.q) return { ...prev };
-        const f = (q - prev.q) / (a.q - prev.q);
-        return { q, x: prev.x + f * (a.x - prev.x), line: prev.line };
-      }
-      prev = a;
-    }
-    return { ...prev };
+  /** x position of a moment in time; the same for both hands. */
+  const xAt = (_hand: Hand, q: number): Anchor | null => {
+    if (!spans.length) return null;
+    const mi = Math.min(Math.max(0, Math.floor(q / mq)), spans.length - 1);
+    const sp = spans[mi];
+    const f = Math.min(Math.max((q - mi * mq) / mq, 0), 1);
+    return { q, x: sp.x0 + f * (sp.x1 - sp.x0), line: sp.line };
   };
 
   /** Rectangles covering q0..q1 in a hand's duration lane, split at line breaks. */
@@ -222,7 +246,10 @@ export function renderScore(container: HTMLElement, ex: Exercise): RenderedScore
       const b = Math.min(q1, lb.endQ - 2e-6);
       if (b <= a) return;
       const xa = xAt(hand, a)!.x;
-      const xb = xAt(hand, b)!.x - (b === q1 ? trim : 0);
+      let xb = xAt(hand, b)!.x - (b === q1 ? trim : 0);
+      // Time spans run on to the next bar's first note; stop lanes at the bar line.
+      const bar = Math.round(b / mq);
+      if (bar > 0 && Math.abs(b - bar * mq) < 1e-3) xb = Math.min(xb, spans[bar - 1].barX - 4 - (b === q1 ? trim : 0));
       const r = document.createElementNS(SVG_NS, 'rect');
       r.setAttribute('x', String(xa - 4));
       r.setAttribute('y', String(markerY[hand][li] + laneOffset));
