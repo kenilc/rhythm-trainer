@@ -16,10 +16,13 @@
           Latency: <strong id="latency-text">not calibrated</strong>
         </span>
         <button id="calibrate" class="small">Calibrate</button>
+        <button id="fold" class="small" aria-controls="menu" aria-expanded="true">Hide settings</button>
       </div>
     </header>
 
     <main>
+      <button id="menu-summary" class="menu-summary" hidden title="Show settings"></button>
+      <div id="menu" class="menu">
       <section class="panel settings" aria-label="Settings">
         <div class="field">
           <label for="bpm">Tempo <span class="hint" id="bpm-unit">(♩ = BPM)</span></label>
@@ -131,6 +134,7 @@
           </div>
         </details>
       </section>
+      </div>
 
       <section class="panel stage" aria-label="Practice">
         <div class="transport">

@@ -57,6 +57,8 @@ interface Settings {
   repeats: number;
   /** One bar of rest (with clicks) between repetitions. */
   restBar: boolean;
+  /** Settings panels folded away. */
+  menuFolded: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -75,6 +77,7 @@ const DEFAULTS: Settings = {
   key: 'C',
   repeats: 1,
   restBar: false,
+  menuFolded: false,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -173,6 +176,26 @@ function syncControls(): void {
       : 'Keyboard fallback: Space or J K L') +
     (exercise && isPitched(exercise) ? ' (timing only: checking notes needs MIDI)' : '');
   $('latency-text').textContent = latencyMs === null ? 'not calibrated' : `${Math.round(latencyMs)} ms`;
+
+  // Folded menu: a one-line summary stands in for the panels.
+  $('menu').hidden = settings.menuFolded;
+  $('menu-summary').hidden = !settings.menuFolded;
+  $('fold').textContent = settings.menuFolded ? 'Show settings' : 'Hide settings';
+  $('fold').setAttribute('aria-expanded', String(!settings.menuFolded));
+  const parts = [
+    `<strong>${settings.bpm}</strong> BPM`,
+    `<strong>${settings.meter}</strong>`,
+    settings.twoHands ? 'Two hands' : 'One hand',
+    settings.repeats === 1 ? 'Once' : settings.repeats === 0 ? 'Loop' : `${settings.repeats}×`,
+  ];
+  if (exercise && isPitched(exercise)) parts.push(keyById(exercise.key).label);
+  $('menu-summary').innerHTML = `${parts.map((p) => `<span>${p}</span>`).join('<span>·</span>')}<span class="show">Show settings ▾</span>`;
+}
+
+function setMenuFolded(folded: boolean): void {
+  settings.menuFolded = folded;
+  persist();
+  syncControls();
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +966,8 @@ onChange(repeatsSel, () => {
 onChange(restBar, () => ((settings.restBar = restBar.checked), persist()));
 
 $('generate').addEventListener('click', generate);
+$('fold').addEventListener('click', () => setMenuFolded(!settings.menuFolded));
+$('menu-summary').addEventListener('click', () => setMenuFolded(false));
 $('apply').addEventListener('click', applyCustom);
 startBtn.addEventListener('click', () => startRun('play'));
 listenBtn.addEventListener('click', () => startRun('listen'));

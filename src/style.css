@@ -586,6 +586,34 @@ dialog h2 {
   min-height: 2.8em;
 }
 
+.menu {
+  display: grid;
+  gap: 16px;
+}
+/* Shown instead of the settings panels when they're folded. */
+.menu-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 10px 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.menu-summary strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.menu-summary .show {
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 [hidden] {
   display: none !important;
 }
