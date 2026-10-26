@@ -53,13 +53,78 @@ export function click(bus: AudioNode, time: number, kind: ClickKind): void {
   osc.stop(time + 0.05);
 }
 
-/** A short tone used to demo the exercise ("Listen"); at the written pitch if there is one. */
+let noise: AudioBuffer | null = null;
+
+/** Half a second of white noise, made once and shared by every drum hit. */
+function noiseBuffer(c: AudioContext): AudioBuffer {
+  if (!noise) {
+    noise = c.createBuffer(1, Math.round(c.sampleRate * 0.5), c.sampleRate);
+    const data = noise.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  }
+  return noise;
+}
+
+/** Snare: a band of noise for the rattle plus a short pitched body. */
+function snare(bus: AudioNode, time: number): void {
+  const c = audioCtx();
+  const src = c.createBufferSource();
+  src.buffer = noiseBuffer(c);
+  const band = c.createBiquadFilter();
+  band.type = 'highpass';
+  band.frequency.value = 1200;
+  const nEnv = c.createGain();
+  nEnv.gain.setValueAtTime(0, time);
+  nEnv.gain.linearRampToValueAtTime(0.7, time + 0.002);
+  nEnv.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+  src.connect(band).connect(nEnv).connect(bus);
+  src.start(time);
+  src.stop(time + 0.2);
+
+  const body = c.createOscillator();
+  const bEnv = c.createGain();
+  body.type = 'triangle';
+  body.frequency.setValueAtTime(220, time);
+  body.frequency.exponentialRampToValueAtTime(160, time + 0.08);
+  bEnv.gain.setValueAtTime(0, time);
+  bEnv.gain.linearRampToValueAtTime(0.6, time + 0.002);
+  bEnv.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+  body.connect(bEnv).connect(bus);
+  body.start(time);
+  body.stop(time + 0.12);
+}
+
+/** Bass drum: a sine that drops quickly in pitch. */
+function kick(bus: AudioNode, time: number): void {
+  const c = audioCtx();
+  const osc = c.createOscillator();
+  const env = c.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(150, time);
+  osc.frequency.exponentialRampToValueAtTime(45, time + 0.15);
+  env.gain.setValueAtTime(0, time);
+  env.gain.linearRampToValueAtTime(1, time + 0.003);
+  env.gain.exponentialRampToValueAtTime(0.001, time + 0.3);
+  osc.connect(env).connect(bus);
+  osc.start(time);
+  osc.stop(time + 0.32);
+}
+
+/**
+ * A note used to demo the exercise ("Listen"): at the written pitch if
+ * there is one, otherwise a drum (snare for the right hand, bass drum for
+ * the left) so the hands are easy to tell apart.
+ */
 export function tone(bus: AudioNode, time: number, hand: 'R' | 'L', durSec: number, midi?: number): void {
+  if (midi === undefined) {
+    (hand === 'R' ? snare : kick)(bus, time);
+    return;
+  }
   const c = audioCtx();
   const osc = c.createOscillator();
   const env = c.createGain();
   osc.type = 'triangle';
-  osc.frequency.value = midi !== undefined ? midiToFreq(midi) : hand === 'R' ? 784 : 262;
+  osc.frequency.value = midiToFreq(midi);
   const len = Math.min(Math.max(durSec * 0.8, 0.06), 0.5);
   env.gain.setValueAtTime(0, time);
   env.gain.linearRampToValueAtTime(0.5, time + 0.004);

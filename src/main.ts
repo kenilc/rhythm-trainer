@@ -59,6 +59,16 @@ interface Settings {
   restBar: boolean;
   /** Settings panels folded away. */
   menuFolded: boolean;
+  /** The exercise on screen is the saved custom rhythm, so reload brings it back. */
+  customActive: boolean;
+}
+
+/** The last rhythm typed in by hand, kept so it survives a reload. */
+interface SavedRhythm {
+  rh: string;
+  lh: string | null;
+  meter: string;
+  key: string;
 }
 
 const DEFAULTS: Settings = {
@@ -78,6 +88,7 @@ const DEFAULTS: Settings = {
   repeats: 1,
   restBar: false,
   menuFolded: false,
+  customActive: false,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -99,6 +110,7 @@ function save(key: string, value: unknown): void {
 const settings: Settings = load('rt.settings', DEFAULTS);
 let latencyMs: number | null = load<{ v: number | null }>('rt.latency', { v: null }).v;
 const persist = () => save('rt.settings', settings);
+let savedRhythm: SavedRhythm | null = load<{ v: SavedRhythm | null }>('rt.custom', { v: null }).v;
 
 const meterOf = (s: string): Meter => METERS.find((m) => `${m.num}/${m.den}` === s) ?? METERS[3];
 
@@ -169,6 +181,7 @@ function syncControls(): void {
   $('lh-text-wrap').hidden = !settings.twoHands;
   $('split-field').hidden = !settings.twoHands;
   $('bpm-unit').textContent = meterOf(settings.meter).den === 2 ? '(𝅗𝅥 = BPM)' : '(♩ = BPM)';
+  $('restore').hidden = !savedRhythm || settings.customActive;
   $('chord-legend').hidden = !(exercise && isPitched(exercise));
   $('keys-hint').textContent =
     (settings.twoHands
@@ -218,6 +231,8 @@ function setExercise(ex: Exercise): void {
 }
 
 function generate(): void {
+  settings.customActive = false;
+  persist();
   setExercise(
     generateExercise({
       meter: meterOf(settings.meter),
@@ -231,7 +246,7 @@ function generate(): void {
   );
 }
 
-function applyCustom(): void {
+function applyCustom(): boolean {
   const meter = meterOf(settings.meter);
   try {
     const rh = splitMeasures(parseRhythm(rhText.value), meter);
@@ -244,10 +259,27 @@ function applyCustom(): void {
       }
       if (lh.length !== rh.length) throw new Error(`Right hand has ${rh.length} bars but left hand has ${lh.length}.`);
     }
+    savedRhythm = { rh: rhText.value, lh: lh ? lhText.value : null, meter: settings.meter, key: settings.key };
+    save('rt.custom', { v: savedRhythm });
+    settings.customActive = true;
+    persist();
     setExercise({ meter, key: settings.key, rh, lh });
+    return true;
   } catch (e) {
     parseError.textContent = (e as Error).message;
+    return false;
   }
+}
+
+/** Bring back the saved custom rhythm, with the meter, hands and key it was written for. */
+function restoreCustom(): boolean {
+  if (!savedRhythm) return false;
+  settings.meter = savedRhythm.meter;
+  settings.twoHands = savedRhythm.lh !== null;
+  settings.key = savedRhythm.key;
+  rhText.value = savedRhythm.rh;
+  lhText.value = savedRhythm.lh ?? '';
+  return applyCustom();
 }
 
 // ---------------------------------------------------------------------------
@@ -956,7 +988,10 @@ onChange(keySel, () => {
   persist();
   // New notes for a generated exercise; a typed one just gets the new key signature.
   if (settings.notes !== 'rhythm') generate();
-  else setExercise({ ...exercise, key: settings.key });
+  else {
+    if (settings.customActive && savedRhythm) save('rt.custom', { v: (savedRhythm = { ...savedRhythm, key: settings.key }) });
+    setExercise({ ...exercise, key: settings.key });
+  }
 });
 onChange(repeatsSel, () => {
   settings.repeats = Number(repeatsSel.value);
@@ -969,6 +1004,7 @@ $('generate').addEventListener('click', generate);
 $('fold').addEventListener('click', () => setMenuFolded(!settings.menuFolded));
 $('menu-summary').addEventListener('click', () => setMenuFolded(false));
 $('apply').addEventListener('click', applyCustom);
+$('restore').addEventListener('click', restoreCustom);
 startBtn.addEventListener('click', () => startRun('play'));
 listenBtn.addEventListener('click', () => startRun('listen'));
 stopBtn.addEventListener('click', stopPressed);
@@ -1025,4 +1061,5 @@ new ResizeObserver(() => {
 }).observe(scoreEl);
 
 syncControls();
-generate();
+// A typed-in rhythm comes back after a reload; otherwise start with a fresh one.
+if (!(settings.customActive && restoreCustom())) generate();
