@@ -110,6 +110,11 @@ function kick(bus: AudioNode, time: number): void {
   osc.stop(time + 0.32);
 }
 
+/** The drum for a hand: snare for the right, bass drum for the left. */
+export function drum(bus: AudioNode, time: number, hand: 'R' | 'L'): void {
+  (hand === 'R' ? snare : kick)(bus, time);
+}
+
 /**
  * A note used to demo the exercise ("Listen"): at the written pitch if
  * there is one, otherwise a drum (snare for the right hand, bass drum for
@@ -117,7 +122,7 @@ function kick(bus: AudioNode, time: number): void {
  */
 export function tone(bus: AudioNode, time: number, hand: 'R' | 'L', durSec: number, midi?: number): void {
   if (midi === undefined) {
-    (hand === 'R' ? snare : kick)(bus, time);
+    drum(bus, time, hand);
     return;
   }
   const c = audioCtx();

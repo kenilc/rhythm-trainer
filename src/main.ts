@@ -1,4 +1,4 @@
-import { audioCtx, click, makeBus, Metronome, perfToAudio, tone } from './audio';
+import { audioCtx, click, drum, makeBus, Metronome, perfToAudio, tone } from './audio';
 import { InputManager, midiNoteName, type MidiStatus, type RawHit } from './input';
 import { renderScore, type NoteMark, type RenderedScore } from './notation';
 import { KEYS, keyById, pitchName, spellMidi } from './pitch';
@@ -580,6 +580,9 @@ function release(id: string, t: number): void {
   rendered.drawHold(h.drawId, h.rec.hand, qIn(run, h.rec.time, h.rec.rep), qIn(run, h.rec.release!, h.rec.rep), kind);
 }
 
+/** Bus for the drum heard on each key press; lives for the whole page. */
+let pressBus: GainNode | null = null;
+
 function onHit(h: RawHit): void {
   if (h.kind === 'up') {
     if (run) release(h.id, perfToAudio(h.perf) - lat());
@@ -590,15 +593,17 @@ function onHit(h: RawHit): void {
     calib.hits.push(perfToAudio(h.perf));
     return;
   }
-  if (!run?.session || run.mode !== 'play') return;
-  const r = run;
-  const session = run.session;
   const t = perfToAudio(h.perf) - lat();
+  const played = h.source === 'midi' ? h.note : undefined;
+  const session = run?.mode === 'play' ? run.session : null;
+  // A key the exercise is waiting for in one hand counts for that hand.
+  const hand = (played !== undefined && settings.twoHands && session?.handForKey(played, t)) || handFor(h);
+  pressBus ??= makeBus();
+  drum(pressBus, audioCtx().currentTime, hand);
+  if (!run || !session) return;
+  const r = run;
   // Ignore stray notes during the count-in.
   if (t < r.exStart - 0.25 || t > r.end) return;
-  const played = h.source === 'midi' ? h.note : undefined;
-  // A key the exercise is waiting for in one hand counts for that hand.
-  const hand = (played !== undefined && settings.twoHands && session.handForKey(played, t)) || handFor(h);
   const rec = session.registerHit(hand, t, h.label, repAt(r, t), played);
   // A repeated press without a release (shouldn't happen) closes the old one first.
   release(h.id, t);
