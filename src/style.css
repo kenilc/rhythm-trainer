@@ -79,10 +79,23 @@ body {
   align-items: center;
 }
 
-main {
-  max-width: 1200px;
+/* History on the left, the trainer on the right. */
+.layout {
+  max-width: 1500px;
   margin: 0 auto;
   padding: 16px;
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.layout.no-history {
+  max-width: 1200px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+main {
+  min-width: 0;
   display: grid;
   gap: 16px;
 }
@@ -618,13 +631,124 @@ dialog h2 {
   display: none !important;
 }
 
-@media (max-width: 640px) {
-  main {
-    padding: 16px 16px;
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
   }
+  /* On narrow screens the history goes below the trainer. */
+  .history {
+    order: 1;
+    position: static;
+    max-height: none;
+  }
+  .history-list {
+    max-height: 50vh;
+  }
+}
+
+@media (max-width: 640px) {
   .beat-display {
     margin-left: 0;
     width: 100%;
     justify-content: flex-start;
   }
+}
+
+.history {
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.history h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.history > .hint {
+  margin: 0;
+}
+.history-list {
+  list-style: none;
+  margin: 0 -8px;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+.history-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  border-radius: 8px;
+}
+.history-item:hover {
+  background: var(--bg);
+}
+.history-item.current {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.history-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+.history-open:hover:not(:disabled) {
+  background: none;
+}
+.history-name {
+  font-weight: 600;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.history-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+.history-text {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history-actions {
+  display: flex;
+  padding: 5px 4px 0 0;
+  opacity: 0;
+}
+.history-item:hover .history-actions,
+.history-item:focus-within .history-actions,
+.history-item.current .history-actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .history-actions {
+    opacity: 1;
+  }
+}
+.history-actions button {
+  border: 0;
+  background: none;
+  padding: 2px 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.history-actions button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--border);
+}
+.history-rename {
+  flex: 1;
+  margin: 4px 0 4px 4px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
 }

@@ -16,9 +16,18 @@
           Latency: <strong id="latency-text">not calibrated</strong>
         </span>
         <button id="calibrate" class="small">Calibrate</button>
+        <button id="history-fold" class="small" aria-controls="history" aria-expanded="true">Hide history</button>
         <button id="fold" class="small" aria-controls="menu" aria-expanded="true">Hide settings</button>
       </div>
     </header>
+
+    <div id="layout" class="layout">
+    <aside id="history" class="panel history" aria-label="History">
+      <h2>History</h2>
+      <p class="hint">Every exercise you generate or write. Click one to practise it again.</p>
+      <ul id="history-list" class="history-list"></ul>
+      <p id="history-empty" class="hint" hidden></p>
+    </aside>
 
     <main>
       <button id="menu-summary" class="menu-summary" hidden title="Show settings"></button>
@@ -130,7 +139,6 @@
           </div>
           <div class="row">
             <button id="apply">Use this rhythm</button>
-            <button id="restore" hidden>Back to my saved rhythm</button>
             <span id="parse-error" class="error" role="alert"></span>
           </div>
         </details>
@@ -185,6 +193,7 @@
         </details>
       </section>
     </main>
+    </div>
 
     <dialog id="cal-dialog">
       <h2>Calibrate latency</h2>

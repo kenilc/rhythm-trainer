@@ -1,3 +1,4 @@
+import { addEntry, deleteEntry, getEntry, listEntries, putEntry, type HistoryEntry } from './history';
 import { audioCtx, click, drum, makeBus, Metronome, perfToAudio, tone } from './audio';
 import { InputManager, midiNoteName, type MidiStatus, type RawHit } from './input';
 import { renderScore, type NoteMark, type RenderedScore } from './notation';
@@ -59,17 +60,19 @@ interface Settings {
   restBar: boolean;
   /** Settings panels folded away. */
   menuFolded: boolean;
-  /** The exercise on screen is the saved custom rhythm, so reload brings it back. */
-  customActive: boolean;
+  /** History panel folded away. */
+  historyFolded: boolean;
+  /** History entry on screen, so a reload brings it back. */
+  currentId: number | null;
 }
 
-/** The last rhythm typed in by hand, kept so it survives a reload. */
-interface SavedRhythm {
-  rh: string;
-  lh: string | null;
-  meter: string;
-  key: string;
-}
+/** Settings saved with each history entry and restored with it. */
+const ENTRY_KEYS = [
+  'bpm', 'meter', 'twoHands', 'countIn', 'strictness', 'clickDuring', 'subdivide',
+  'level', 'bars', 'lhPattern', 'notes', 'key', 'repeats', 'restBar',
+] as const;
+type EntrySettings = Pick<Settings, (typeof ENTRY_KEYS)[number]>;
+type Entry = HistoryEntry<EntrySettings>;
 
 const DEFAULTS: Settings = {
   bpm: 80,
@@ -88,7 +91,8 @@ const DEFAULTS: Settings = {
   repeats: 1,
   restBar: false,
   menuFolded: false,
-  customActive: false,
+  historyFolded: false,
+  currentId: null,
 };
 
 function load<T>(key: string, fallback: T): T {
@@ -110,7 +114,6 @@ function save(key: string, value: unknown): void {
 const settings: Settings = load('rt.settings', DEFAULTS);
 let latencyMs: number | null = load<{ v: number | null }>('rt.latency', { v: null }).v;
 const persist = () => save('rt.settings', settings);
-let savedRhythm: SavedRhythm | null = load<{ v: SavedRhythm | null }>('rt.custom', { v: null }).v;
 
 const meterOf = (s: string): Meter => METERS.find((m) => `${m.num}/${m.den}` === s) ?? METERS[3];
 
@@ -181,7 +184,10 @@ function syncControls(): void {
   $('lh-text-wrap').hidden = !settings.twoHands;
   $('split-field').hidden = !settings.twoHands;
   $('bpm-unit').textContent = meterOf(settings.meter).den === 2 ? '(𝅗𝅥 = BPM)' : '(♩ = BPM)';
-  $('restore').hidden = !savedRhythm || settings.customActive;
+  $('history').hidden = settings.historyFolded;
+  $('layout').classList.toggle('no-history', settings.historyFolded);
+  $('history-fold').textContent = settings.historyFolded ? 'Show history' : 'Hide history';
+  $('history-fold').setAttribute('aria-expanded', String(!settings.historyFolded));
   $('chord-legend').hidden = !(exercise && isPitched(exercise));
   $('keys-hint').textContent =
     (settings.twoHands
@@ -231,10 +237,7 @@ function setExercise(ex: Exercise): void {
 }
 
 function generate(): void {
-  settings.customActive = false;
-  persist();
-  setExercise(
-    generateExercise({
+  const ex = generateExercise({
       meter: meterOf(settings.meter),
       bars: settings.bars,
       level: settings.level,
@@ -242,11 +245,13 @@ function generate(): void {
       lhPattern: settings.lhPattern,
       notes: settings.notes,
       key: settings.key,
-    }),
-  );
+  });
+  setExercise(ex);
+  void record('generated', ex);
 }
 
-function applyCustom(): boolean {
+/** Use the typed-in rhythm; resolves once it's in the history, or null if it doesn't parse. */
+function applyCustom(): Promise<void> | null {
   const meter = meterOf(settings.meter);
   try {
     const rh = splitMeasures(parseRhythm(rhText.value), meter);
@@ -259,27 +264,144 @@ function applyCustom(): boolean {
       }
       if (lh.length !== rh.length) throw new Error(`Right hand has ${rh.length} bars but left hand has ${lh.length}.`);
     }
-    savedRhythm = { rh: rhText.value, lh: lh ? lhText.value : null, meter: settings.meter, key: settings.key };
-    save('rt.custom', { v: savedRhythm });
-    settings.customActive = true;
-    persist();
-    setExercise({ meter, key: settings.key, rh, lh });
-    return true;
+    const ex = { meter, key: settings.key, rh, lh };
+    setExercise(ex);
+    return record('custom', ex);
   } catch (e) {
     parseError.textContent = (e as Error).message;
-    return false;
+    return null;
   }
 }
 
-/** Bring back the saved custom rhythm, with the meter, hands and key it was written for. */
-function restoreCustom(): boolean {
-  if (!savedRhythm) return false;
-  settings.meter = savedRhythm.meter;
-  settings.twoHands = savedRhythm.lh !== null;
-  settings.key = savedRhythm.key;
-  rhText.value = savedRhythm.rh;
-  lhText.value = savedRhythm.lh ?? '';
-  return applyCustom();
+// ---------------------------------------------------------------------------
+// History
+
+const historyList = $<HTMLUListElement>('history-list');
+
+function entrySettings(): EntrySettings {
+  return Object.fromEntries(ENTRY_KEYS.map((k) => [k, settings[k]])) as EntrySettings;
+}
+
+function defaultName(source: Entry['source'], ex: Exercise): string {
+  const bars = `${ex.rh.length} bar${ex.rh.length === 1 ? '' : 's'}`;
+  const parts = [source === 'custom' ? 'Your rhythm' : `Level ${settings.level}`, `${ex.meter.num}/${ex.meter.den}`, bars];
+  if (ex.lh) parts.push('both hands');
+  if (isPitched(ex)) parts.push(keyById(ex.key).label);
+  return parts.join(' · ');
+}
+
+/** Add the exercise now on screen to the history and make it the current entry. */
+async function record(source: Entry['source'], ex: Exercise): Promise<void> {
+  try {
+    const entry = await addEntry<EntrySettings>({
+      name: defaultName(source, ex),
+      created: Date.now(),
+      source,
+      exercise: ex,
+      settings: entrySettings(),
+    });
+    settings.currentId = entry.id;
+    persist();
+  } catch (e) {
+    console.warn('Could not save to history', e);
+  }
+  void renderHistory();
+}
+
+/** Put the trainer back as it was for a history entry. Resolves false if it's gone. */
+async function openEntry(id: number): Promise<boolean> {
+  const entry = await getEntry<EntrySettings>(id);
+  if (!entry) return false;
+  Object.assign(settings, entry.settings);
+  settings.currentId = id;
+  persist();
+  setExercise(entry.exercise);
+  void renderHistory();
+  return true;
+}
+
+function whenText(ms: number): string {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === new Date().toDateString()) return `Today ${time}`;
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+}
+
+const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text = '') => {
+  const e = document.createElement(tag);
+  e.className = cls;
+  e.textContent = text;
+  return e;
+};
+
+async function renderHistory(): Promise<void> {
+  const empty = $('history-empty');
+  let entries: Entry[];
+  try {
+    entries = await listEntries<EntrySettings>();
+  } catch {
+    historyList.replaceChildren();
+    empty.textContent = "History isn't available in this browser.";
+    empty.hidden = false;
+    return;
+  }
+  empty.textContent = 'Nothing yet.';
+  empty.hidden = entries.length > 0;
+  historyList.replaceChildren(...entries.map(historyItem));
+}
+
+function historyItem(entry: Entry): HTMLLIElement {
+  const li = el('li', `history-item${entry.id === settings.currentId ? ' current' : ''}`);
+  const open = el('button', 'history-open');
+  const name = el('span', 'history-name', entry.name);
+  open.append(
+    name,
+    el('span', 'history-meta', `${whenText(entry.created)} · ${entry.settings.bpm} BPM`),
+    el('span', 'history-text', measuresToText(entry.exercise.rh)),
+  );
+  open.title = 'Practise this again';
+  open.addEventListener('click', () => void openEntry(entry.id));
+
+  const actions = el('div', 'history-actions');
+  const renameBtn = el('button', '', '✎');
+  renameBtn.title = renameBtn.ariaLabel = 'Rename';
+  renameBtn.addEventListener('click', () => startRename(li, entry));
+  const deleteBtn = el('button', '', '✕');
+  deleteBtn.title = deleteBtn.ariaLabel = 'Delete';
+  deleteBtn.addEventListener('click', async () => {
+    if (!confirm(`Delete "${entry.name}" from the history?`)) return;
+    await deleteEntry(entry.id);
+    if (settings.currentId === entry.id) {
+      settings.currentId = null;
+      persist();
+    }
+    void renderHistory();
+  });
+  actions.append(renameBtn, deleteBtn);
+  li.append(open, actions);
+  return li;
+}
+
+/** Swap the entry for a text box; Enter or leaving it saves, Escape cancels. */
+function startRename(li: HTMLLIElement, entry: Entry): void {
+  const input = el('input', 'history-rename');
+  input.value = entry.name;
+  li.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (keep: boolean) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (keep && name && name !== entry.name) await putEntry({ ...entry, name });
+    void renderHistory();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void finish(true);
+    else if (e.key === 'Escape') void finish(false);
+  });
+  input.addEventListener('blur', () => void finish(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -994,8 +1116,14 @@ onChange(keySel, () => {
   // New notes for a generated exercise; a typed one just gets the new key signature.
   if (settings.notes !== 'rhythm') generate();
   else {
-    if (settings.customActive && savedRhythm) save('rt.custom', { v: (savedRhythm = { ...savedRhythm, key: settings.key }) });
     setExercise({ ...exercise, key: settings.key });
+    // The entry keeps the key it is now written in.
+    const id = settings.currentId;
+    if (id !== null) {
+      void getEntry<EntrySettings>(id)
+        .then((e) => e && putEntry({ ...e, exercise, settings: { ...e.settings, key: settings.key } }))
+        .catch(() => {});
+    }
   }
 });
 onChange(repeatsSel, () => {
@@ -1009,7 +1137,11 @@ $('generate').addEventListener('click', generate);
 $('fold').addEventListener('click', () => setMenuFolded(!settings.menuFolded));
 $('menu-summary').addEventListener('click', () => setMenuFolded(false));
 $('apply').addEventListener('click', applyCustom);
-$('restore').addEventListener('click', restoreCustom);
+$('history-fold').addEventListener('click', () => {
+  settings.historyFolded = !settings.historyFolded;
+  persist();
+  syncControls();
+});
 startBtn.addEventListener('click', () => startRun('play'));
 listenBtn.addEventListener('click', () => startRun('listen'));
 stopBtn.addEventListener('click', stopPressed);
@@ -1065,6 +1197,38 @@ new ResizeObserver(() => {
   laidOutWidth = w;
 }).observe(scoreEl);
 
+/**
+ * Bring back the exercise that was on screen before the reload, or start
+ * with a fresh one. A rhythm saved by the version before history existed
+ * moves into the history first.
+ */
+async function startup(): Promise<void> {
+  const legacy = load<{ v: { rh: string; lh: string | null; meter: string; key: string } | null }>('rt.custom', { v: null }).v;
+  if (legacy) {
+    try {
+      localStorage.removeItem('rt.custom');
+    } catch {
+      /* storage unavailable */
+    }
+    const old = settings as { customActive?: boolean };
+    const wasOnScreen = old.customActive;
+    delete old.customActive;
+    const before = { ...settings };
+    Object.assign(settings, { meter: legacy.meter, twoHands: legacy.lh !== null, key: legacy.key });
+    rhText.value = legacy.rh;
+    lhText.value = legacy.lh ?? '';
+    const saved = applyCustom();
+    if (saved) {
+      await saved;
+      if (wasOnScreen) return;
+    }
+    Object.assign(settings, { meter: before.meter, twoHands: before.twoHands, key: before.key, currentId: before.currentId });
+  }
+  const id = settings.currentId;
+  if (id !== null && (await openEntry(id).catch(() => false))) return;
+  generate();
+}
+
 syncControls();
-// A typed-in rhythm comes back after a reload; otherwise start with a fresh one.
-if (!(settings.customActive && restoreCustom())) generate();
+void renderHistory();
+void startup();
