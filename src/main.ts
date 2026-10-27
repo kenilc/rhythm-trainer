@@ -1,5 +1,5 @@
 import { addEntry, deleteEntry, getEntry, listEntries, putEntry, type HistoryEntry } from './history';
-import { audioCtx, click, drum, makeBus, Metronome, perfToAudio, tone } from './audio';
+import { audioCtx, click, drum, makeBus, Metronome, perfToAudio, setClickVolume, tone } from './audio';
 import { InputManager, midiNoteName, type MidiStatus, type RawHit } from './input';
 import { renderScore, type NoteMark, type RenderedScore } from './notation';
 import { KEYS, keyById, pitchName, spellMidi } from './pitch';
@@ -47,6 +47,8 @@ interface Settings {
   strictness: string;
   split: number;
   clickDuring: boolean;
+  /** Click loudness in percent (100 = original level). */
+  clickVolume: number;
   subdivide: boolean;
   level: number;
   bars: number;
@@ -82,6 +84,7 @@ const DEFAULTS: Settings = {
   strictness: 'normal',
   split: 60,
   clickDuring: true,
+  clickVolume: 100,
   subdivide: false,
   level: 1,
   bars: 4,
@@ -127,6 +130,7 @@ const countInSel = $<HTMLSelectElement>('countin');
 const strictSel = $<HTMLSelectElement>('strictness');
 const splitSel = $<HTMLSelectElement>('split');
 const clickDuring = $<HTMLInputElement>('click-during');
+const clickVolume = $<HTMLInputElement>('click-volume');
 const subdivide = $<HTMLInputElement>('subdivide');
 const levelSel = $<HTMLSelectElement>('level');
 const barsSel = $<HTMLSelectElement>('bars');
@@ -166,6 +170,9 @@ function syncControls(): void {
   strictSel.value = settings.strictness;
   splitSel.value = String(settings.split);
   clickDuring.checked = settings.clickDuring;
+  clickVolume.value = String(settings.clickVolume);
+  $('click-volume-value').textContent = `${settings.clickVolume}%`;
+  setClickVolume(settings.clickVolume / 100);
   subdivide.checked = settings.subdivide;
   levelSel.value = String(settings.level);
   barsSel.value = String(settings.bars);
@@ -1101,6 +1108,11 @@ onChange(countInSel, () => ((settings.countIn = Number(countInSel.value)), persi
 onChange(strictSel, () => ((settings.strictness = strictSel.value), persist()));
 onChange(splitSel, () => ((settings.split = Number(splitSel.value)), persist()));
 onChange(clickDuring, () => ((settings.clickDuring = clickDuring.checked), persist()));
+clickVolume.addEventListener('input', () => {
+  settings.clickVolume = Number(clickVolume.value);
+  persist();
+  syncControls();
+});
 onChange(subdivide, () => ((settings.subdivide = subdivide.checked), persist()));
 onChange(levelSel, () => ((settings.level = Number(levelSel.value)), persist()));
 onChange(barsSel, () => ((settings.bars = Number(barsSel.value)), persist()));

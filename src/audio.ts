@@ -37,20 +37,33 @@ export function makeBus(volume = 1): GainNode {
   return g;
 }
 
+let clickVolume = 1;
+
+/**
+ * Loudness of every click (metronome, count-in, during exercises), 0–2.
+ * The accent is already close to full scale, so above 1 the clicks also
+ * ring longer, which is what makes them sound louder.
+ */
+export function setClickVolume(v: number): void {
+  clickVolume = v;
+}
+
 export function click(bus: AudioNode, time: number, kind: ClickKind): void {
+  if (clickVolume <= 0) return;
   const c = audioCtx();
   const osc = c.createOscillator();
   const env = c.createGain();
   const freq = kind === 'accent' ? 1760 : kind === 'beat' ? 1320 : 990;
-  const peak = kind === 'accent' ? 0.9 : kind === 'beat' ? 0.6 : 0.25;
+  const peak = Math.min((kind === 'accent' ? 0.9 : kind === 'beat' ? 0.6 : 0.25) * clickVolume, 1);
+  const len = 0.035 * Math.max(clickVolume, 1);
   osc.type = 'square';
   osc.frequency.value = freq;
   env.gain.setValueAtTime(0, time);
   env.gain.linearRampToValueAtTime(peak, time + 0.001);
-  env.gain.exponentialRampToValueAtTime(0.001, time + 0.035);
+  env.gain.exponentialRampToValueAtTime(0.001, time + len);
   osc.connect(env).connect(bus);
   osc.start(time);
-  osc.stop(time + 0.05);
+  osc.stop(time + len + 0.015);
 }
 
 let noise: AudioBuffer | null = null;
